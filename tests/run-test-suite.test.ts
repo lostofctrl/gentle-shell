@@ -18,20 +18,21 @@ function fakeRunStage(codes) {
 	};
 }
 
-test("default stages cover unit tests, provider contract, and runtime harness", () => {
+test("default stages cover unit tests, local composer, provider contract, and runtime harness", () => {
 	assert.deepEqual(
 		DEFAULT_STAGES.map((stage) => stage.name),
-		["unit-tests", "provider-contract", "runtime-harness"],
+		["unit-tests", "local-composer", "provider-contract", "runtime-harness"],
 	);
 });
 
 test("every stage runs even when an earlier stage fails", async () => {
-	const run = fakeRunStage([1, 0, 1]);
+	const run = fakeRunStage([1, 0, 0, 1]);
 	const results = await runTestSuite(DEFAULT_STAGES, { runStageImpl: run, write: () => {} });
 	assert.deepEqual(
 		results,
 		[
 			{ name: "unit-tests", code: 1 },
+			{ name: "local-composer", code: 0 },
 			{ name: "provider-contract", code: 0 },
 			{ name: "runtime-harness", code: 1 },
 		],

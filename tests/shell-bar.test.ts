@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { after, before, type TestContext } from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 import { DEFAULT_VISUAL_SETTINGS } from "../lib/visual-customization-policy.ts";
 import {
 	buildShellHeaderModel,
@@ -215,7 +215,7 @@ test("renderShellBar renders one line with the segments in order", () => {
 	assert.equal(rest.length, 0);
 	assert.equal(
 		line,
-		"✿ gentle shell ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
+		"✿ gentle shell ⟡ ~/work/gentle-pi ⎇ main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
 	);
 });
 
@@ -242,7 +242,7 @@ test("renderShellBar shows the branch as dirty-neutral and omits it outside git"
 
 test("renderShellBar shows the session dirty count next to the branch", () => {
 	const [line] = renderShellBar(model({ dirty: 3 }), taggedTheme, 400);
-	assert.match(line, /<text>main<\/text> <warning>±3<\/warning>/);
+	assert.match(line, /<text>⎇ main<\/text> <warning>±3<\/warning>/);
 	const [clean] = renderShellBar(model({ dirty: 0 }), plainTheme, 160);
 	assert.doesNotMatch(clean, /±/);
 });
@@ -317,10 +317,10 @@ test("renderShellBar repaints extension statuses in the bar role, discarding col
 test("renderShellBar compacts the path and branch before it sacrifices an extension status", () => {
 	const long = model({ branch: "fix/shell-bar-status-ansi", dirty: 2, statuses: ["MCP: 3/3 servers"] });
 	const [full] = renderShellBar(long, plainTheme, 160);
-	assert.match(full, /~\/work\/gentle-pi fix\/shell-bar-status-ansi ±2 .* MCP: 3\/3 servers$/);
+	assert.match(full, /~\/work\/gentle-pi ⎇ fix\/shell-bar-status-ansi ±2 .* MCP: 3\/3 servers$/);
 	const [compact] = renderShellBar(long, plainTheme, 118);
 	assert.ok(visibleWidth(compact) <= 118, `line overflowed: ${visibleWidth(compact)}`);
-	assert.match(compact, /⟡ gentle-pi fix\/shell-bar-… ±2 ⟡/);
+	assert.match(compact, /⟡ gentle-pi ⎇ fix\/shell-bar-… ±2 ⟡/);
 	assert.match(compact, /MCP: 3\/3 servers$/);
 });
 
@@ -416,11 +416,13 @@ test("sidebar Status card drops Model, Effort, Context, Cost and Usage, keeping 
 // statuses — those stay in the prompt and the Status card.
 
 test("buildShellHeaderModel keeps only the header's fields from the bar model", () => {
-	const header = buildShellHeaderModel(model({ profile: "team", statuses: ["MCP: 3 servers"] }));
+	const header = buildShellHeaderModel(model({ sessionName: "Release notes", profile: "team", statuses: ["MCP: 3 servers"] }));
 	assert.deepEqual(header, {
 		cwd: "~/work/gentle-pi",
 		branch: "main",
 		dirty: undefined,
+		sessionName: "Release notes",
+		latestPrompt: undefined,
 		modelId: "gpt-5.5",
 		effort: "medium",
 		profile: "team",
@@ -432,10 +434,85 @@ test("buildShellHeaderModel keeps only the header's fields from the bar model", 
 	assert.ok(!("statuses" in header), "extension statuses never reach the header");
 });
 
+test("renderShellHeaderBar shows the session name in the left identity group", () => {
+	const header = buildShellHeaderModel(model({ sessionName: "Release notes" }));
+	const { text } = renderShellHeaderBar(header, plainTheme, 140);
+	assert.match(text, /^✿ ⟡ Release notes ⟡/);
+	assert.match(text, /gpt-5\.5 · medium/);
+	assert.match(text, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
+	assert.equal(visibleWidth(text), 140);
+});
+
+test("header keeps a meaningful long session name with brand, model and counters at narrow widths", () => {
+	const header = buildShellHeaderModel(model({ sessionName: "Release notes for " + "x".repeat(500) }));
+	for (const width of [80, 100, 140]) {
+		const { text } = renderShellHeaderBar(header, plainTheme, width);
+		assert.match(text, /^✿ ⟡ Release [^⟡]*… ⟡/);
+		assert.match(text, /gpt-5\.5/);
+		assert.match(text, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/);
+		assert.equal(visibleWidth(text), width);
+		assert.equal(text.split("\n").length, 1);
+	}
+	for (const width of [0, 3, 10, 20, 40, 60]) {
+		assert.ok(visibleWidth(renderShellHeaderBar(header, plainTheme, width).text) <= width);
+	}
+});
+
+test("header sanitizes session ANSI, OSC and controls before painting", () => {
+	const sessionName = "\x1b[31mRelease\x1b[0m\nnotes\t\x00\x07\x9b2J\x1b]8;;https://example.test\x07safe\x1b]8;;\x1b\\";
+	const { text } = renderShellHeaderBar(buildShellHeaderModel(model({ sessionName })), plainTheme, 140);
+	assert.match(text, /^✿ ⟡ Release notes safe ⟡/);
+	assert.doesNotMatch(text, /[\x00-\x1f\x7f-\x9f]|example\.test/);
+});
+
+test("header truncates wide session graphemes by columns and preserves usage hit testing", (t) => {
+	useCardStyle(t, CARD_STYLE.FLOAT);
+	const header = buildShellHeaderModel(model({ sessionName: "界🚀e\u0301".repeat(100) }));
+	for (const theme of [plainTheme, withBackground(plainTheme)]) {
+		for (const width of [80, 100, 140]) {
+			const chrome = renderShellHeaderChrome(header, theme, width);
+			const text = stripAnsi(chrome.rows[chrome.headerRow]!);
+			const name = text.match(/✿ ⟡ (.*?) ⟡/)?.[1];
+			assert.ok(name, text);
+			assert.match(name, /^(?:界🚀e\u0301)*(?:界(?:🚀)?)?…$/u, "no split wide or combining graphemes");
+			assert.equal(visibleWidth(text), width);
+			if (width >= 100) assert.ok(chrome.usageSpan, "standing usage remains clickable when it fits");
+			if (!chrome.usageSpan) {
+				assert.equal(shellHeaderUsageHit(chrome, 0, chrome.headerRow), false);
+				continue;
+			}
+			const { start, end } = chrome.usageSpan;
+			assert.equal(sliceByColumn(text, start, end - start), "usage");
+			assert.equal(shellHeaderUsageHit(chrome, start, chrome.headerRow), true);
+			assert.equal(shellHeaderUsageHit(chrome, start - 1, chrome.headerRow), false);
+			assert.equal(shellHeaderUsageHit(chrome, end, chrome.headerRow), false);
+			assert.equal(shellHeaderUsageHit(chrome, start, chrome.headerRow + 1), false);
+		}
+	}
+});
+
+test("nameless and sanitized-empty session headers keep identical rendering", () => {
+	for (const width of [0, 40, 80, 100, 140]) {
+		const expected = renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, width);
+		for (const sessionName of ["", " \t\n\x1b[31m\x1b[0m "]) {
+			assert.deepEqual(renderShellHeaderBar(buildShellHeaderModel(model({ sessionName })), plainTheme, width), expected);
+		}
+	}
+});
+
+test("session identity survives minimal density and hidden model/counters", () => {
+	const header = buildShellHeaderModel(model({ sessionName: "Release notes" }));
+	const settings = { ...DEFAULT_VISUAL_SETTINGS, density: "minimal" as const, visibility: { ...DEFAULT_VISUAL_SETTINGS.visibility, modelDetails: false, usageCost: false } };
+	const { text } = renderShellHeaderBar(header, plainTheme, 80, undefined, settings);
+	assert.match(text, /^Release notes ⟡/);
+	assert.doesNotMatch(text, /Gentle Shell|gpt-5\.5|ctx|usage/);
+	assert.equal(visibleWidth(text), 80);
+});
+
 test("renderShellHeaderBar draws the brand, identity, and right-aligned counters (plus the standing usage segment) in one line", () => {
 	const header = buildShellHeaderModel(model({ profile: "team" }));
 	const { text: line } = renderShellHeaderBar(header, plainTheme, 120);
-	const left = "✿ Gentle Shell ⟡ ~/work/gentle-pi main ⟡ gpt-5.5 · medium · team";
+	const left = "✿ ⟡ ~/work/gentle-pi ⎇ main ⟡ gpt-5.5 · medium · team";
 	const right = "ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub ⟡ usage";
 	assert.equal(line, left + " ".repeat(120 - visibleWidth(left) - visibleWidth(right)) + right);
 	assert.equal(visibleWidth(line), 120);
@@ -452,52 +529,52 @@ test("renderShellHeaderBar colors the brand bold and by role", () => {
 	const bolding = { fg: (color: string, text: string) => `<${color}>${text}</${color}>`, bold: (text: string) => `**${text}**` };
 	const header = buildShellHeaderModel(model());
 	const { text: line } = renderShellHeaderBar(header, bolding, 120);
-	assert.match(line, /<accent>\*\*✿ Gentle Shell\*\*<\/accent>/);
+	assert.match(line, /<accent>\*\*✿\*\*<\/accent>/);
 });
 
 test("renderShellHeaderBar drops the profile, then the effort, then the whole location before the right group", () => {
 	const withProfile = buildShellHeaderModel(model({ profile: "team" }));
 	const { text: wide } = renderShellHeaderBar(withProfile, plainTheme, 120);
 	assert.match(wide, /gpt-5\.5 · medium · team/);
-	assert.match(wide, /~\/work\/gentle-pi main/);
+	assert.match(wide, /~\/work\/gentle-pi ⎇ main/);
 	assert.match(wide, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
 
-	// 100 cols: the profile no longer fits, but effort and location still do.
-	const { text: noProfile } = renderShellHeaderBar(withProfile, plainTheme, 100);
+	// 90 cols: the profile no longer fits, but effort and location still do.
+	const { text: noProfile } = renderShellHeaderBar(withProfile, plainTheme, 90);
 	assert.doesNotMatch(noProfile, /team/);
 	assert.match(noProfile, /gpt-5\.5 · medium/);
-	assert.match(noProfile, /~\/work\/gentle-pi main/);
-	assert.equal(visibleWidth(noProfile), 100);
+	assert.match(noProfile, /~\/work\/gentle-pi ⎇ main/);
+	assert.equal(visibleWidth(noProfile), 90);
 
-	// 90 cols: effort goes too, only the bare model id remains next to location.
-	const { text: noEffort } = renderShellHeaderBar(withProfile, plainTheme, 90);
+	// 80 cols: effort goes too, only the bare model id remains next to location.
+	const { text: noEffort } = renderShellHeaderBar(withProfile, plainTheme, 80);
 	assert.doesNotMatch(noEffort, /medium/);
 	assert.doesNotMatch(noEffort, /team/);
 	assert.match(noEffort, /gpt-5\.5/);
-	assert.match(noEffort, /~\/work\/gentle-pi main/);
-	assert.equal(visibleWidth(noEffort), 90);
+	assert.match(noEffort, /~\/work\/gentle-pi ⎇ main/);
+	assert.equal(visibleWidth(noEffort), 80);
 
-	// 82 cols: the whole location segment goes; brand and model survive with the counters.
-	const { text: noLocation } = renderShellHeaderBar(withProfile, plainTheme, 82);
+	// 70 cols: the whole location segment goes; brand and model survive with the counters.
+	const { text: noLocation } = renderShellHeaderBar(withProfile, plainTheme, 70);
 	assert.doesNotMatch(noLocation, /~\/work\/gentle-pi/);
 	assert.match(noLocation, /gpt-5\.5/);
-	assert.match(noLocation, /✿ Gentle Shell/);
+	assert.match(noLocation, /✿/);
 	assert.match(noLocation, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
-	assert.equal(visibleWidth(noLocation), 82);
+	assert.equal(visibleWidth(noLocation), 70);
 
-	// 60 cols: even the standing usage segment is gone now; brand+model and ctx/cost survive.
-	const { text: noUsage } = renderShellHeaderBar(withProfile, plainTheme, 60);
+	// 40 cols: even the standing usage segment is gone now; brand, ctx and cost survive.
+	const { text: noUsage } = renderShellHeaderBar(withProfile, plainTheme, 40);
 	assert.doesNotMatch(noUsage, /~\/work\/gentle-pi/);
 	assert.doesNotMatch(noUsage, /usage/);
-	assert.match(noUsage, /gpt-5\.5/);
-	assert.match(noUsage, /✿ Gentle Shell/);
+	assert.match(noUsage, /✿/);
 	assert.match(noUsage, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/);
-	assert.equal(visibleWidth(noUsage), 60);
+	assert.equal(visibleWidth(noUsage), 40);
 });
 
 test("renderShellHeaderBar returns an empty string only once the brand itself cannot fit", () => {
-	assert.equal(renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, 3).text, "");
-	assert.match(renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, 40).text, /✿ Gentle Shell/);
+	assert.equal(renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, 0).text, "");
+	assert.equal(renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, 3).text, "✿");
+	assert.match(renderShellHeaderBar(buildShellHeaderModel(model()), plainTheme, 40).text, /✿/);
 });
 
 // T8: the usage segment. It rides after cost in the right group, shows every
@@ -538,23 +615,23 @@ test("renderShellHeaderBar degrades the usage segment (gauges, then secondary wi
 	// 100 cols: the gauges no longer fit, but both windows still show as text
 	// (a positive match on the bare "5h 26% · week 12%" run rules out any
 	// gauge glyph sneaking in between them; ctx's own gauge is unrelated).
-	const noGauges = renderShellHeaderBar(header, plainTheme, 100, "alt+u").text;
+	const noGauges = renderShellHeaderBar(header, plainTheme, 90, "alt+u").text;
 	assert.match(noGauges, /usage 5h 26% · week 12% · alt\+u$/);
 	assert.match(noGauges, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/, "ctx/cost are untouched while usage still degrades");
-	assert.equal(visibleWidth(noGauges), 100);
+	assert.equal(visibleWidth(noGauges), 90);
 
 	// 80 cols: only the first window remains.
-	const primaryOnly = renderShellHeaderBar(header, plainTheme, 80, "alt+u").text;
+	const primaryOnly = renderShellHeaderBar(header, plainTheme, 70, "alt+u").text;
 	assert.match(primaryOnly, /usage 5h 26% · alt\+u$/);
 	assert.doesNotMatch(primaryOnly, /week/);
 	assert.match(primaryOnly, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/);
-	assert.equal(visibleWidth(primaryOnly), 80);
+	assert.equal(visibleWidth(primaryOnly), 70);
 
-	// 70 cols: the whole usage segment is gone, ctx/cost remain intact.
-	const noUsage = renderShellHeaderBar(header, plainTheme, 70, "alt+u").text;
+	// 60 cols: the whole usage segment is gone, ctx/cost remain intact.
+	const noUsage = renderShellHeaderBar(header, plainTheme, 60, "alt+u").text;
 	assert.doesNotMatch(noUsage, /usage/);
 	assert.match(noUsage, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/);
-	assert.equal(visibleWidth(noUsage), 70);
+	assert.equal(visibleWidth(noUsage), 60);
 });
 
 test("renderShellHeaderBar's usage span always points at the usage text, not ctx/cost", () => {
@@ -695,7 +772,7 @@ test("float header paints every available cell even after ANSI resets", (t) => {
 		fg: (_color: string, text: string) => `\x1b[31m${text}\x1b[0m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[m`,
 	});
-	const header = buildShellHeaderModel(model({ cwd: "directory " + "x".repeat(180) }));
+	const header = buildShellHeaderModel(model({ cwd: "directory " + "x".repeat(180), sessionName: "Release notes " + "x".repeat(180) }));
 	for (const width of [10, 40, 90, 140]) {
 		const { rows } = renderShellHeaderChrome(header, theme, width, "alt+u");
 		for (const [index, row] of rows.entries()) {

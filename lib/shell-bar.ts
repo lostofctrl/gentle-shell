@@ -1,7 +1,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { GAUGE_CELLS, gaugeTone, paintGauge, renderGauge, type GaugePaint, type GaugeTone } from "./shell-gauge.ts";
 import { renderUsageBar, selectUsageLimit, type ProviderUsage, type UsageWindow } from "./shell-usage.ts";
-import { sanitizeTerminalText } from "./terminal-theme.ts";
+import { sanitizeTerminalText, stripAnsi } from "./terminal-theme.ts";
 import { CARD_TONE, floatRows, panelInnerWidth, renderCard } from "./shell-card.ts";
 import { REVIEW_SCOPE_UNAVAILABLE, REVIEW_SIDEBAR_LABELS, type ReviewSidebarSnapshot } from "./review-sidebar-state.ts";
 import type { VisualSettings } from "./visual-customization-policy.ts";
@@ -9,7 +9,7 @@ import { renderChangesWidget, type ChangesModel } from "./shell-changes.ts";
 import type { RunningJobDisplay } from "./jobs-sidebar-state.ts";
 import { JOB_GLYPH } from "./background-jobs-tools.ts";
 
-type Presentation = Pick<VisualSettings, "density" | "visibility">;
+type Presentation = Pick<VisualSettings, "density" | "visibility"> & { promptOwnsChrome?: boolean };
 type HeaderPresentation = Presentation & Partial<Pick<VisualSettings, "headerPlacement" | "statusPlacement">>;
 
 export { gaugeTone, renderGauge, type GaugeTone };
@@ -27,6 +27,7 @@ export interface ShellBarModel {
 	branch: string | null;
 	dirty: number | undefined;
 	sessionName: string | undefined;
+	latestPrompt?: string;
 	modelId: string;
 	effort: string | undefined;
 	contextPercent: number | null;
@@ -41,6 +42,8 @@ export interface ShellBarModel {
 // live counters. Only the structured jobs count may join context/cost when
 // Status is absent; opaque extension statuses and working state stay excluded.
 export interface ShellHeaderModel {
+	sessionName?: string;
+	latestPrompt?: string;
 	jobs?: number;
 	cwd: string;
 	branch: string | null;
@@ -58,8 +61,8 @@ export interface ShellHeaderModel {
 }
 
 export function buildShellHeaderModel(model: ShellBarModel, showJobs = false): ShellHeaderModel {
-	const { cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage } = model;
-	return { cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage,
+	const { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage } = model;
+	return { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage,
 		...(showJobs && model.jobs?.length ? { jobs: model.jobs.length } : {}) };
 }
 
@@ -149,7 +152,7 @@ function sanitizeStatus(text: string): string {
 function locationSegment(model: Pick<ShellBarModel, "cwd" | "branch" | "dirty">, theme: ShellBarTheme): string {
 	const dirty = model.dirty ? ` ${theme.fg(ROLE.DIRTY, `±${model.dirty}`)}` : "";
 	return model.branch
-		? `${theme.fg(ROLE.PATH, model.cwd)} ${theme.fg(ROLE.BRANCH, model.branch)}${dirty}`
+		? `${theme.fg(ROLE.PATH, model.cwd)} ${theme.fg(ROLE.BRANCH, `⎇ ${model.branch}`)}${dirty}`
 		: theme.fg(ROLE.PATH, model.cwd) + dirty;
 }
 
@@ -177,9 +180,11 @@ function buildSegments(model: ShellBarModel, theme: ShellBarTheme, presentation?
 	const statuses = model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
 	return [
 		...(presentation?.density === "minimal" ? [] : [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND)]),
-		location,
-		...(presentation?.visibility.modelDetails === false ? [] : [modelSegment]),
-		...(presentation?.visibility.usageCost === false ? [] : [context, cost, ...(usage ? [usage] : [])]),
+		...(presentation?.promptOwnsChrome ? [] : [
+			location,
+			...(presentation?.visibility.modelDetails === false ? [] : [modelSegment]),
+			...(presentation?.visibility.usageCost === false ? [] : [context, cost, ...(usage ? [usage] : [])]),
+		]),
 		...(model.jobs?.length ? [theme.fg(ROLE.STATUS, shellJobsCount(model.jobs.length))] : []),
 		...statuses,
 	];
@@ -270,14 +275,15 @@ export function renderShellSidebarBar(model: ShellBarModel, theme: ShellBarTheme
 	return renderCard({ title: "Status", body, tone: CARD_TONE.INFO }, theme, width, { expanded: true, panel: true });
 }
 
-const HEADER_BRAND = "✿ Gentle Shell";
+const HEADER_BRAND = "✿";
 
 // Narrower than the width, widest first: dropping the profile, then the
 // effort, then the whole location keeps the brand and the bare model id
 // alive as long as anything can still share the row with the right-aligned
 // counters.
-function headerLeftStages(model: ShellHeaderModel, theme: ShellBarTheme, showModelDetails: boolean): string[][] {
+function headerLeftStages(model: ShellHeaderModel, theme: ShellBarTheme, showModelDetails: boolean, promptOwnsChrome = false): string[][] {
 	const brand = theme.fg(ROLE.BRAND, theme.bold(HEADER_BRAND));
+	if (promptOwnsChrome) return [[brand]];
 	const location = locationSegment(model, theme);
 	if (!showModelDetails) return [[brand, location], [brand]];
 	const withEffort = executionSegment(model.modelId, model.effort, theme);
@@ -338,6 +344,46 @@ function fitHeaderContent(text: string, width: number): string {
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
+export function renderComposerMetrics(model: ShellBarModel, theme: ShellBarTheme, width: number, usageHint?: string, presentation?: Presentation, paint?: GaugePaint): ShellHeaderResult {
+	width = Math.max(0, Math.floor(width));
+	// Local plan-mode.ts publishes this label only while read-only planning is active.
+	const planning = model.statuses.some((status) => stripAnsi(status) === "⏸ plan");
+	const windows = model.usage ? (selectUsageLimit(model.usage, model.modelId)?.windows ?? []) : [];
+	for (const stage of [0, 1, 2, 3]) {
+		const usage = presentation?.visibility.usageCost === false || stage === 3 ? undefined
+			: usageSegmentText(windows, theme, stage === 0 ? "full" : stage === 1 ? "text" : "primary", usageHint, paint);
+		const parts = [
+			...(planning ? [theme.fg("warning", "📋")] : []),
+			...(presentation?.visibility.modelDetails === false ? [] : [executionSegment(model.modelId, stage === 0 ? model.effort : undefined, theme)]),
+			...(presentation?.visibility.usageCost === false ? [] : [
+				stage === 0 ? contextSegment(model.contextPercent, theme, paint) : theme.fg(ROLE.VALUE, `ctx ${model.contextPercent === null ? "?" : Math.round(model.contextPercent)}%`),
+				...(stage < 2 ? [costSegment(model.costTotal, model.subscription, theme)] : []),
+			]),
+		];
+		const prefix = joinSegments(parts, theme);
+		const text = joinSegments([...parts, ...(usage ? [usage] : [])], theme);
+		if (visibleWidth(text) <= width) return { text, ...(usage ? { usageSpan: { start: visibleWidth(prefix) + (prefix ? visibleWidth(` ${SHELL_BAR_SEPARATOR} `) : 0), end: visibleWidth(text) } } : {}) };
+		if (stage === 3) return { text: truncateToWidth(text, width, "…") };
+	}
+	return { text: "" };
+}
+
+export function renderComposerLocation(model: Pick<ShellBarModel, "cwd" | "branch" | "dirty">, theme: ShellBarTheme, width: number): string {
+	width = Math.max(0, Math.floor(width));
+	if (!width) return "";
+	const branch = model.branch ? sanitizeStatus(truncateToWidth(`⎇ ${sanitizeStatus(model.branch)}`, Math.max(0, Math.floor(width / 2)), "…")) : "";
+	const dirty = model.dirty ? ` ±${model.dirty}` : "";
+	const suffix = (branch ? ` ${branch}` : "") + dirty;
+	const pathWidth = Math.max(0, width - visibleWidth(suffix));
+	let path = sanitizeStatus(model.cwd);
+	if (visibleWidth(path) > pathWidth) {
+		const chars = Array.from(path);
+		while (chars.length && visibleWidth(`…${chars.join("")}`) > pathWidth) chars.shift();
+		path = pathWidth ? `…${chars.join("")}` : "";
+	}
+	return truncateToWidth(theme.fg(ROLE.PATH, path) + theme.fg(ROLE.BRANCH, suffix), width, "…");
+}
+
 export function renderShellHeaderBar(model: ShellHeaderModel, theme: ShellBarTheme, width: number, usageHint?: string, presentation?: Presentation, paint?: GaugePaint): ShellHeaderResult {
 	const targetWidth = Math.max(0, Math.floor(width));
 	let content: ShellHeaderResult | undefined;
@@ -382,11 +428,12 @@ function headerContent(model: ShellHeaderModel, theme: ShellBarTheme, width: num
 	const jobs = model.jobs ? theme.fg(ROLE.STATUS, shellJobsCount(model.jobs)) : undefined;
 	const ctxCost = joinSegments([
 		...(jobs ? [jobs] : []),
-		...(presentation?.visibility.usageCost === false ? [] : [contextSegment(model.contextPercent, theme, paint), costSegment(model.costTotal, model.subscription, theme)]),
+		...(presentation?.promptOwnsChrome || presentation?.visibility.usageCost === false ? [] : [contextSegment(model.contextPercent, theme, paint), costSegment(model.costTotal, model.subscription, theme)]),
 	], theme);
 	const windows = model.usage ? (selectUsageLimit(model.usage, model.modelId)?.windows ?? []) : [];
-	const leftStages = headerLeftStages(model, theme, presentation?.visibility.modelDetails !== false)
+	const leftStages = headerLeftStages(model, theme, presentation?.visibility.modelDetails !== false, presentation?.promptOwnsChrome)
 		.map((stage) => presentation?.density === "minimal" ? stage.slice(1) : stage);
+	const sessionName = sanitizeStatus(model.sessionName ?? "");
 	const minimalLeft = Math.max(0, leftStages.length - 2); // brand + bare model id, before dropping the model too
 	// One flat, ordered cascade — never a per-stage nested search — so the
 	// left group fully degrades (profile → effort → location) before usage
@@ -396,7 +443,7 @@ function headerContent(model: ShellHeaderModel, theme: ShellBarTheme, width: num
 	// Unlike the compact bar's usage meter (hidden with no data), this is a
 	// standing, clickable affordance — even with nothing to report it still
 	// reads "usage" plus the shortcut hint, unless disabled, width permitting.
-	const usageStages: Array<UsageStage | undefined> = presentation?.visibility.usageCost === false ? [undefined] : ["full", "text", "primary", undefined];
+	const usageStages: Array<UsageStage | undefined> = presentation?.promptOwnsChrome || presentation?.visibility.usageCost === false ? [undefined] : ["full", "text", "primary", undefined];
 	const attempts: Array<{ leftIndex: number; usageStage: UsageStage | undefined }> = [
 		...leftStages.slice(0, minimalLeft).map((_, leftIndex) => ({ leftIndex, usageStage: usageStages[0] })),
 		...usageStages.map((usageStage) => ({ leftIndex: minimalLeft, usageStage })),
@@ -405,9 +452,22 @@ function headerContent(model: ShellHeaderModel, theme: ShellBarTheme, width: num
 	for (const { leftIndex, usageStage } of attempts) {
 		const usageText = usageStage ? usageSegmentText(windows, theme, usageStage, usageHint, paint) : undefined;
 		const right = usageText ? joinSegments([ctxCost, usageText], theme) : ctxCost;
-		const left = joinSegments(leftStages[leftIndex]!, theme);
+		const parts = [...leftStages[leftIndex]!];
+		if (sessionName) {
+			const nameWidth = targetWidth - visibleWidth(joinSegments(parts, theme))
+				- (parts.length ? visibleWidth(` ${SHELL_BAR_SEPARATOR} `) : 0)
+				- (right ? RIGHT_PADDING : 0) - visibleWidth(right);
+			// Keep a meaningful prefix before degrading location/model/usage further.
+			if (nameWidth < Math.min(12, visibleWidth(sessionName))) continue;
+			const name = sanitizeTerminalText(truncateToWidth(sessionName, nameWidth, "…"));
+			parts.splice(presentation?.density === "minimal" ? 0 : 1, 0, theme.fg(ROLE.SESSION, name));
+		}
+		const left = joinSegments(parts, theme);
 		if (visibleWidth(left) + (right ? RIGHT_PADDING : 0) + visibleWidth(right) > targetWidth) continue;
-		const text = left + " ".repeat(targetWidth - visibleWidth(left) - visibleWidth(right)) + right;
+		const previewWidth = targetWidth - visibleWidth(left) - visibleWidth(right) - (left ? RIGHT_PADDING : 0) - (right ? RIGHT_PADDING : 0);
+		const preview = previewWidth >= 4 ? truncateToWidth(sanitizeStatus(model.latestPrompt ?? ""), previewWidth, "…") : "";
+		const rightContent = [preview ? theme.fg(ROLE.SEPARATOR, `\x1b[2;3m${preview}\x1b[22;23m`) : "", right].filter(Boolean).join(" ".repeat(RIGHT_PADDING));
+		const text = left + " ".repeat(targetWidth - visibleWidth(left) - visibleWidth(rightContent)) + rightContent;
 		if (!usageText) return { text };
 		const usageStart = visibleWidth(left) + (targetWidth - visibleWidth(left) - visibleWidth(right)) + visibleWidth(ctxCost) + visibleWidth(` ${SHELL_BAR_SEPARATOR} `);
 		return { text, usageSpan: { start: usageStart, end: usageStart + visibleWidth(usageText) } };

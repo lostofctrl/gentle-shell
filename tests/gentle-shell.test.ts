@@ -3500,7 +3500,7 @@ test("below-input header remains a fullscreen widget without the rail and follow
 		const pending = commands.get("gentle:customize")!.handler("", ctx);
 		await overlayReady;
 		await customizeAction(ui, "Header placement: below-input");
-		assert.match(widget(tui, plainTheme).render(180).join("\n"), /Gentle Shell/);
+		assert.match(widget(tui, plainTheme).render(180).join("\n"), /✿ ⟡/);
 		assert.equal(widget(tui, plainTheme).render(180).length, 2);
 		tui.mode = "regular";
 		assert.deepEqual(widget(tui, plainTheme).render(180), []);
@@ -3530,7 +3530,7 @@ test("narrow fullscreen with a below-input header shows only the bottom bar, car
 		assert.deepEqual(widget(tui, plainTheme).render(100), [], "no second status row below the input at narrow width");
 		const narrow = footer.render(100);
 		assert.equal(narrow.length, 2);
-		assert.match(narrow[0]!, /Gentle Shell/, "bottom-only bar reuses the header row");
+		assert.match(narrow[0]!, /✿ ⟡/, "bottom-only bar reuses the header row");
 		assert.match(narrow[0]!, /ctx .* 45%/);
 		assert.match(narrow[0]!, /\$0\.000 sub/);
 		assert.match(narrow[0]!, /usage/);
@@ -3595,7 +3595,7 @@ test("T4d unified float footer uses one live owner and restores legacy Changes o
 			const rows = footer.render(width);
 			assert.equal(rows.length, 6);
 			assert.match(stripAnsi(rows[2]!), /1 file · \+2 −0/);
-			assert.match(stripAnsi(rows[3]!), /Gentle Shell/);
+			assert.match(stripAnsi(rows[3]!), /✿ ⟡/);
 			assert.match(stripAnsi(rows[4]!), /^  MCP ready/);
 			assert.ok(rows.slice(1).every((row) => row.startsWith(bg)));
 			assert.deepEqual(changes.render(width), []);
@@ -3672,7 +3672,7 @@ test("T4d unified float footer uses one live owner and restores legacy Changes o
 		assert.equal(widget("gentle-shell-changes").render(240).length, 1, "top placement restores standalone Changes");
 		const above = railHeader.render(240);
 		assert.equal(above.length, 4);
-		assert.match(stripAnsi(above[1]!), /Gentle Shell/);
+		assert.match(stripAnsi(above[1]!), /✿ ⟡/);
 		assert.equal(stripAnsi(above[3]!), "▔".repeat(240));
 		ui.overlayView!.handleInput("\x1b");
 		await pending;

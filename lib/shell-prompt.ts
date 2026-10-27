@@ -63,6 +63,9 @@ export interface PromptFrameOptions {
 	 * Ignored outside the WORKING state; undefined falls back to "working…".
 	 */
 	workingLabel?: string;
+	/** Width-aware live composer chrome; neither slot changes editor geometry. */
+	topRight?: (width: number) => string;
+	bottomRight?: (width: number) => string;
 }
 
 // A terminal cell cannot grow, so the petal earns presence with weight and
@@ -108,6 +111,24 @@ function stateLabel(options: PromptFrameOptions): string | undefined {
 	return STATE_LABEL[options.state];
 }
 
+function promptTopSides(left: string, options: PromptFrameOptions, width: number, outlined = false, right = options.topRight?.(Math.max(0, width - 2 - Math.min(40, Math.ceil(width / 3)))) ?? ""): string {
+	const budget = Math.max(0, width - 2 - Math.min(40, Math.ceil(width / 3)));
+	right = truncateToWidth(right, budget, "…");
+	const leftWidth = Math.max(0, width - visibleWidth(right) - (right ? 2 : 0));
+	const clipped = truncateToWidth(left, leftWidth, "…");
+	const gap = Math.max(0, width - visibleWidth(clipped) - visibleWidth(right));
+	const fill = outlined && gap > 2 ? options.borderColor(` ${rule(gap - 2)} `) : " ".repeat(gap);
+	return clipped + fill + right;
+}
+
+function promptBottomContent(options: PromptFrameOptions, width: number, indicator?: string, outlined = false): string {
+	const hint = truncateToWidth(indicator ? options.fg(LABEL_ROLE, indicator) : "", width, "…");
+	const right = truncateToWidth(options.bottomRight?.(Math.max(0, width - visibleWidth(hint) - (hint ? 2 : 0))) ?? "", Math.max(0, width - visibleWidth(hint) - (hint ? 2 : 0)), "…");
+	const gap = Math.max(0, width - visibleWidth(right) - visibleWidth(hint));
+	const fill = outlined && gap > 2 ? options.borderColor(` ${rule(gap - 2)} `) : " ".repeat(gap);
+	return hint + fill + right;
+}
+
 function topRule(width: number, options: PromptFrameOptions, indicator: string | undefined): string {
 	const label = indicator ?? stateLabel(options);
 	const scanning = options.state === PROMPT_STATE.WORKING;
@@ -115,6 +136,8 @@ function topRule(width: number, options: PromptFrameOptions, indicator: string |
 	const petal = options.fg(petalTone(options.state, options.tick), options.bold ? options.bold(glyph) : glyph);
 	const paintedLabel = label && scanning && !indicator ? scanWorkingText(label, options.tick, options.fg) : label ? options.fg(LABEL_ROLE, label) : "";
 	const title = [petal, paintedLabel].filter(Boolean).join(" ");
+	const right = options.topRight?.(Math.max(0, width - 6)) ?? "";
+	if (right && width >= 8) return options.borderColor("╭─ ") + promptTopSides(title, options, width - 6, true, right) + options.borderColor(" ─╮");
 	const titleWidth = visibleWidth(glyph) + (label ? visibleWidth(label) + (glyph ? 1 : 0) : 0);
 	const fill = width - titleWidth - 5;
 	if (fill < 0) return options.borderColor(`╭${rule(width - 2)}╮`);
@@ -122,6 +145,8 @@ function topRule(width: number, options: PromptFrameOptions, indicator: string |
 }
 
 function bottomRule(width: number, options: PromptFrameOptions, indicator: string | undefined): string {
+	const right = options.bottomRight?.(Math.max(0, width - 6)) ?? "";
+	if (right && width >= 6) return options.borderColor("╰─ ") + promptBottomContent(options, width - 6, indicator, true) + options.borderColor(" ─╯");
 	if (!indicator) return options.borderColor(`╰${rule(width - 2)}╯`);
 	const fill = width - 3 - indicator.length - 1 - 1;
 	if (fill < 0) return options.borderColor(`╰${rule(width - 2)}╯`);
@@ -207,6 +232,10 @@ function floatPromptHint(top: string, bottom: string, options: PromptFrameOption
 	const info = [scrollIndicator(top), options.escHint ?? scrollIndicator(bottom)]
 		.filter((text): text is string => Boolean(text))
 		.map((text) => options.fg(LABEL_ROLE, text));
+	if (options.topRight) {
+		const right = options.topRight(Math.max(0, width - 2));
+		if (right) return "  " + promptTopSides(petal + (paintedLabel ? " " + paintedLabel : "") + (info.length ? " · " + info.join(" · ") : ""), options, width, false, right);
+	}
 	const hint = truncateToWidth("  " + petal + (paintedLabel ? " " + paintedLabel : "") + (info.length ? " · " + info.join(" · ") : ""), width, "");
 	return hint + " ".repeat(Math.max(0, width - visibleWidth(hint)));
 }
@@ -217,7 +246,7 @@ export function framePromptLines(lines: string[], width: number, options: Prompt
 		return [
 			floatPromptRow(floatPromptHint(lines[0], lines[lines.length - 1], options, layout.nativeWidth).slice(2), layout, options.borderColor),
 			...lines.slice(1, -1).map((line) => floatPromptRow(line, layout, options.borderColor)),
-			floatPromptRow("", layout, options.borderColor),
+			floatPromptRow(options.bottomRight ? promptBottomContent(options, layout.nativeWidth, options.escHint ?? scrollIndicator(lines[lines.length - 1])) : "", layout, options.borderColor),
 		];
 	}
 	if (lines.length < 2) return lines.map((line) => truncateToWidth(line, width, ""));

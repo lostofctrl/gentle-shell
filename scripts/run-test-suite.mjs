@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_STAGES = Object.freeze([
 	{ name: "unit-tests", command: "node --experimental-strip-types --test tests/*.test.ts" },
+	{ name: "local-composer", command: "node --experimental-strip-types --test tests/local-composer.test.mjs" },
 	{ name: "provider-contract", command: "pnpm run check:provider-contract" },
 	{ name: "runtime-harness", command: "pnpm run test:harness" },
 ]);

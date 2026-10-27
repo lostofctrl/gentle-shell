@@ -1,4 +1,4 @@
-import { CustomEditor, keyHint, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, keyHint, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { isHomeOrBroadUserDirectory } from "../lib/bounded-writer-admission.ts";
 import { Editor, decodeKittyPrintable, isKeyRelease, matchesKey, parseKey, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { execFile, spawnSync } from "node:child_process";
@@ -9,7 +9,7 @@ import { profilesFilePath, profileRoleEntries, readProfilesFileResult } from "..
 import { resolveSessionProfile, sessionProfileLabel, sessionProfileModelProfiles } from "../lib/session-profile-freeze.ts";
 import * as os from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { buildShellHeaderModel, renderShellBar, renderShellBelowInputFloat, renderShellBottomOnlyBar, renderShellHeaderChrome, renderShellSidebarBar, keepNativeWorkingRow, shellEnabled, shellHeaderUsageHit, shellJobsCount, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
+import { buildShellHeaderModel, renderComposerMetrics, renderComposerLocation, renderShellBar, renderShellBelowInputFloat, renderShellBottomOnlyBar, renderShellHeaderChrome, renderShellSidebarBar, keepNativeWorkingRow, shellEnabled, shellHeaderUsageHit, shellJobsCount, type ShellBarModel, type ShellBarTheme, type ShellHeaderResult } from "../lib/shell-bar.ts";
 import { CHANGE_STATUS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_TOO_LARGE, WorktreeChangesTracker, renderChangesWidget, type ChangedFile, type ChangesModel, type FileRevision, type GitRunner, type LineCounter, type WorktreeChanges } from "../lib/shell-changes.ts";
 import { WorktreeChangesView } from "../lib/shell-changes-view.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
@@ -273,7 +273,7 @@ function sessionCost(ctx: ExtensionContext): number {
 	return total;
 }
 
-type ShellSessionStats = { costTotal: number; usage: ReturnType<ExtensionContext["getContextUsage"]> };
+type ShellSessionStats = { costTotal: number; usage: ReturnType<ExtensionContext["getContextUsage"]>; latestPrompt?: string };
 const shellSessionStats = new WeakMap<object, {
 	sessionId: string | undefined;
 	leafId: string | null;
@@ -285,7 +285,14 @@ const shellSessionStats = new WeakMap<object, {
 
 function sessionStats(ctx: ExtensionContext): ShellSessionStats {
 	const manager = ctx.sessionManager as ExtensionContext["sessionManager"] & { getEntryCount?(): number };
-	const compute = (): ShellSessionStats => ({ costTotal: sessionCost(ctx), usage: ctx.getContextUsage() });
+	const compute = (): ShellSessionStats => {
+		const latestUser = (manager.getBranch?.() ?? []).findLast((entry) => entry.type === "message" && entry.message.role === "user");
+		const content = latestUser?.type === "message" && latestUser.message.role === "user" ? latestUser.message.content : undefined;
+		const text = typeof content === "string" ? content : content?.filter((part) => part.type === "text").map((part) => part.text).join(" ");
+		const skill = text ? parseSkillBlock(text) : null;
+		const latestPrompt = skill ? [`/skill:${skill.name}`, skill.userMessage].filter(Boolean).join(" ") : text;
+		return { costTotal: sessionCost(ctx), usage: ctx.getContextUsage(), latestPrompt };
+	};
 	// Append-only session entries move the leaf, including compaction and branch
 	// switches. A virtual model's routed physical model comes from the latest
 	// response, which is appended as an entry, so the leaf covers it as well.
@@ -311,11 +318,12 @@ export function buildShellBarModel(
 	options: BuildOptions = {},
 ): ShellBarModel {
 	const home = options.home ?? os.homedir();
-	const { usage, costTotal } = sessionStats(ctx);
+	const { usage, costTotal, latestPrompt } = sessionStats(ctx);
 	const model = ctx.model;
 	const adaptiveReasoning = isNanAdaptiveReasoningModel(model);
+	const sessionName = ctx.sessionManager.getSessionName();
 	const statuses = Array.from(footerData.getExtensionStatuses().entries())
-		.filter(([key]) => options.jobs === undefined || key !== JOBS_STATUS_KEY)
+		.filter(([key]) => (key !== "session-name" || !sessionName) && (options.jobs === undefined || key !== JOBS_STATUS_KEY))
 		.sort(([a], [b]) => a.localeCompare(b))
 		.map(([, text]) => text);
 	return {
@@ -323,7 +331,8 @@ export function buildShellBarModel(
 		profile: options.profile,
 		branch: footerData.getGitBranch(),
 		dirty: options.dirty,
-		sessionName: ctx.sessionManager.getSessionName(),
+		sessionName,
+		latestPrompt,
 		modelId: model?.id ?? "no-model",
 		effort: model?.reasoning ? (adaptiveReasoning ? "auto" : pi.getThinkingLevel()) : undefined,
 		contextPercent: usage?.percent ?? null,
@@ -392,6 +401,9 @@ interface PromptEditorDeps {
 	 * generic "working…" label. Never applied to IDLE or QUEUED.
 	 */
 	workingLabel?: () => string | undefined;
+	metrics?: (width: number) => ShellHeaderResult;
+	location?: (width: number) => string;
+	openUsage?: () => void;
 }
 
 const PROMPT_FRAME_ROLE = "border";
@@ -449,6 +461,7 @@ export class GentlePromptEditor extends CustomEditor {
 	private pulse: NodeJS.Timeout | undefined;
 	private readonly deps: PromptEditorDeps;
 	private floatMouseLayout?: ReturnType<typeof resolvePromptLayout>;
+	private promptUsageSpan?: { start: number; end: number };
 	// Native selection engine (shift+home/end, alt+a, replace-on-key): ported
 	// from pi-select-del so the petal prompt owns the feature without factory
 	// composition. Constructed with `this`; the internals probe degrades to
@@ -1056,6 +1069,11 @@ export class GentlePromptEditor extends CustomEditor {
 	}
 
 	handleMouse(event: Parameters<CustomEditor["handleMouse"]>[0]): ReturnType<CustomEditor["handleMouse"]> {
+		const span = this.promptUsageSpan;
+		if (event.type === "click" && event.button === "left" && event.y === 0 && span && event.x >= span.start && event.x < span.end) {
+			this.deps.openUsage?.();
+			return { handled: true, render: true };
+		}
 		const layout = this.floatMouseLayout;
 		if (!layout) return super.handleMouse(event);
 		// Row coordinates stay native: padding=0, content=1…N, hint=N+1.
@@ -1089,14 +1107,26 @@ export class GentlePromptEditor extends CustomEditor {
 		const visibleCount = (this as unknown as { renderedVisibleLineCount?: number }).renderedVisibleLineCount;
 		const borderEnd = Number.isInteger(visibleCount) && visibleCount! >= 1 && visibleCount! + 2 <= editorLines.length
 			? visibleCount! + 2 : editorLines.length;
+		this.promptUsageSpan = undefined;
+		const selected = this.vimPolicy !== "on" ? this.selectionEngine.selectionLength() : 0;
 		const framed = framePromptLines(editorLines.slice(0, borderEnd), width, {
 			state,
+			topRight: this.deps.metrics ? (available) => {
+				const result = this.deps.metrics!(available);
+				if (result.usageSpan) {
+					const offset = width - (layout.background ? 2 : 3) - visibleWidth(result.text);
+					this.promptUsageSpan = { start: offset + result.usageSpan.start, end: offset + result.usageSpan.end };
+				}
+				return result.text;
+			} : undefined,
+			bottomRight: this.deps.location,
 			tick: this.tick,
 			borderColor: (text) => layout.background ? this.borderColor(text) : this.deps.fg(PROMPT_FRAME_ROLE, text),
 			fg: this.deps.fg,
 			bold: this.deps.bold,
 			workingLabel: this.promptState === PROMPT_STATE.WORKING ? this.deps.workingLabel?.() : undefined,
 			escHint: [
+				this.deps.location && selected ? `${selected} chars selected · Del deletes · Alt+a select all` : undefined,
 				this.vimPolicy === "on" ? (this.vimVisual.active ? (this.vimVisual.kind === "line" ? "VISUAL LINE" : "VISUAL") : this.vimNormal ? "NORMAL" : "INSERT") : undefined,
 				this.promptState === PROMPT_STATE.WORKING && this.isPendingEscapeCancel()
 					? DOUBLE_ESC_CANCEL_HINT
@@ -1105,7 +1135,7 @@ export class GentlePromptEditor extends CustomEditor {
 						: undefined,
 			].filter(Boolean).join(" · ") || undefined,
 		}, layout);
-		if (this.vimPolicy !== "on") {
+		if (this.vimPolicy !== "on" && !this.deps.location) {
 			framed[framed.length - 1] = layout.background
 				? floatPromptRow(this.selectionEngine.decorateBottomRule("", layout.nativeWidth, ""), layout, (text) => this.borderColor(text))
 				: this.selectionEngine.decorateBottomRule(framed[framed.length - 1] ?? "", width, "╯");
@@ -1157,7 +1187,7 @@ type PromptFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorCom
 function installPrompt(
 	ctx: ExtensionContext,
 	onCreated: (prompt: GentlePromptEditor) => void,
-	promptDeps: { now: () => number; doubleEscCancelEnabled: () => boolean; dispatchQueuedText: (text: string) => void; vimRuntimeVersion?: () => string | undefined },
+	promptDeps: Pick<PromptEditorDeps, "metrics" | "location" | "openUsage"> & { now: () => number; doubleEscCancelEnabled: () => boolean; dispatchQueuedText: (text: string) => void; vimRuntimeVersion?: () => string | undefined },
 ): boolean {
 	const previous = ctx.ui.getEditorComponent() as PromptFactory | undefined;
 	if (previous && !previous[PROMPT_OWNER]) return false;
@@ -1174,6 +1204,9 @@ function installPrompt(
 			notifyCompatibility: (message) => ctx.ui.notify(message, "warning"),
 			tuiVersion: promptDeps.vimRuntimeVersion,
 			workingLabel: () => oddPhaseRegistry.label(ctx.sessionManager.getSessionId()),
+			metrics: promptDeps.metrics,
+			location: promptDeps.location,
+			openUsage: promptDeps.openUsage,
 		});
 		// Pi's own docs require an explicit requestRender() after a state change
 		// (docs/tui.md: "Call tui.requestRender() after state changes"); no host
@@ -1774,6 +1807,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		});
 	}
 	let prompt: GentlePromptEditor | undefined;
+	let composerModel: (() => ShellBarModel) | undefined;
 	// Set by abortAndDispatchQueued via dispatchQueuedText when an Esc aborts
 	// a turn with a non-empty queue; sent exactly once, from agent_settled,
 	// once the aborted run has fully settled (issue #1218). Several aborts
@@ -1897,6 +1931,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			redrawReview();
 		}
 		stopProfilePoll();
+		composerModel = undefined;
 		registry?.close();
 		currentContext = ctx;
 		changes = undefined;
@@ -1923,7 +1958,8 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			sidebarTui = tui;
 			if (tui.terminal) sidebarState(tui).visibility = { todo: visualSettings.visibility.todo };
 			renderHost = { requestRender: () => tui.requestRender(), invalidateSidebar: () => invalidateSidebar(tui) };
-			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""), () => visualSettings);
+			const chromePresentation = () => ({ ...visualSettings, promptOwnsChrome: Boolean(prompt && (ctx.ui.getEditorComponent() as PromptFactory | undefined)?.[PROMPT_OWNER]) });
+			const bottom = createShellBarComponent(pi, ctx, renderHost, theme, footerData, () => tracker.model.files.length, () => usage.get(ctx.model?.provider ?? ""), chromePresentation);
 			// The Status card paints live session state that no event re-registers a
 			// part for: model, effort, context, cost, session name and extension
 			// statuses. The digest is what keeps the fullscreen memo honest, and it
@@ -1933,13 +1969,14 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				changes: { files: tracker.model.files.length, added: tracker.model.added, deleted: tracker.model.deleted },
 				review,
 			});
+			composerModel = footerModel;
 			// At narrow fullscreen widths only one status row paints: a top header
 			// suppresses the bottom bar in the layout, and otherwise the bottom bar
 			// takes over the header's data while the below-input header steps aside.
 			const statusOwner = () => narrowStatusOwner({ mode: (tui as TUI & { mode?: string }).mode, columns: tui.terminal?.columns ?? 0, statusPlacement: visualSettings.statusPlacement, headerPlacement: visualSettings.headerPlacement });
 			const statusCardVisible = () => Boolean(tui.terminal && tui.terminal.columns >= SIDEBAR_BREAKPOINT && sidebarState(tui).ownsHost?.() && visualSettings.statusPlacement !== "hidden");
 			const belowFloat = (width: number, statuses: boolean) => (tui as TUI & { mode?: string }).mode === "fullscreen"
-				? renderShellBelowInputFloat({ ...footerModel(), ...(statuses ? {} : { statuses: [] }), ...(statusCardVisible() ? { jobs: undefined } : {}) }, theme, width, usageShortcutKey, visualSettings, tracker.model, gaugePaint(ctx))
+				? renderShellBelowInputFloat({ ...footerModel(), ...(statuses ? {} : { statuses: [] }), ...(statusCardVisible() ? { jobs: undefined } : {}) }, theme, width, usageShortcutKey, chromePresentation(), tracker.model, gaugePaint(ctx))
 				: undefined;
 			// Match sidebarPart's live paint ownership, including an unavailable rail.
 			const footerSuppressed = () => {
@@ -1950,7 +1987,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			groupedChangesOwner = (width) => belowFloat(width, !footerSuppressed()) !== undefined;
 			const bottomBar = {
 				...bottom,
-				render: (width: number) => belowFloat(width, true)?.rows ?? (statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, visualSettings, undefined, gaugePaint(ctx)) : bottom.render(width)),
+				render: (width: number) => belowFloat(width, true)?.rows ?? (statusOwner() === STATUS_OWNER.BOTTOM ? renderShellBottomOnlyBar(footerModel(), theme, width, usageShortcutKey, chromePresentation(), undefined, gaugePaint(ctx)) : bottom.render(width)),
 				handleMouse(event: Parameters<NonNullable<SidebarRail["handleMouse"]>>[0]) {
 					if (footerSuppressed() || event.type !== "click" || event.button !== "left") return undefined;
 					const chrome = belowFloat(event.width, true);
@@ -1960,16 +1997,16 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				},
 			};
 			const part = sidebarPart(tui, "footer", bottomBar, {
-				digest: () => JSON.stringify([footerModel(), tracker.model, visualSettings, cardStyle()]),
-				render: (width) => renderShellSidebarBar(footerModel(), theme, width, visualSettings),
+				digest: () => JSON.stringify([footerModel(), tracker.model, chromePresentation(), cardStyle()]),
+				render: (width) => renderShellSidebarBar(footerModel(), theme, width, chromePresentation()),
 				invalidate() {},
 			});
 			// The header row carries everything that ticks every frame (model,
 			// effort, context, cost, usage) plus session identity and the jobs count
 			// when Status is absent. Opaque statuses and working state stay excluded.
-			const headerBar = (width: number) => renderShellHeaderChrome(buildShellHeaderModel(footerModel(), !statusCardVisible() && (statusOwner() === STATUS_OWNER.HEADER || visualSettings.statusPlacement === "hidden")), theme, width, usageShortcutKey, visualSettings, gaugePaint(ctx));
+			const headerBar = (width: number) => renderShellHeaderChrome(buildShellHeaderModel(footerModel(), !statusCardVisible() && (statusOwner() === STATUS_OWNER.HEADER || visualSettings.statusPlacement === "hidden")), theme, width, usageShortcutKey, chromePresentation(), gaugePaint(ctx));
 			const disposeHeader = sidebarHeader(tui, {
-				digest: () => JSON.stringify([footerModel(), tracker.model, visualSettings, cardStyle()]),
+				digest: () => JSON.stringify([footerModel(), tracker.model, chromePresentation(), cardStyle()]),
 				render: (width) => headerBar(width).rows,
 				invalidate() {},
 				handleMouse(event) {
@@ -2015,10 +2052,18 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			(created) => {
 				prompt?.dispose();
 				prompt = created;
+				renderHost?.invalidateSidebar?.();
+				renderHost?.requestRender();
 				prompt.setAnimationPolicy(animationPolicy);
 				prompt.setVimPolicy(vimPolicy);
 			},
-			{ now: () => deps.now(), doubleEscCancelEnabled: () => doubleEscCancelPolicy === "on", dispatchQueuedText: (text) => { pendingQueuedText = pendingQueuedText === undefined ? text : `${pendingQueuedText}\n\n${text}`; }, vimRuntimeVersion: deps.vimRuntimeVersion },
+			{
+				now: () => deps.now(), doubleEscCancelEnabled: () => doubleEscCancelPolicy === "on",
+				dispatchQueuedText: (text) => { pendingQueuedText = pendingQueuedText === undefined ? text : `${pendingQueuedText}\n\n${text}`; }, vimRuntimeVersion: deps.vimRuntimeVersion,
+				metrics: (width) => composerModel ? renderComposerMetrics(composerModel(), ctx.ui.theme, width, usageShortcutKey, visualSettings, gaugePaint(ctx)) : { text: "" },
+				location: (width) => composerModel ? renderComposerLocation(composerModel(), ctx.ui.theme, width) : "",
+				openUsage: () => { void openUsage(ctx); },
+			},
 		);
 		// Hide native feedback only when our petal replaces it. Native transcript
 		// thinking blocks remain Pi-owned; this changes only the supported loader UI.
@@ -2052,6 +2097,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		pendingQueuedText = undefined;
 		prompt?.dispose();
 		prompt = undefined;
+		composerModel = undefined;
 		if ((ctx.ui.getEditorComponent() as PromptFactory | undefined)?.[PROMPT_OWNER]) {
 			ctx.ui.setEditorComponent(undefined);
 			ctx.ui.setWorkingVisible(true);
@@ -2258,7 +2304,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			rows.push({
 				category,
 				label: () => `YOLO: ${yoloDisplay} · session only`,
-				preview: () => ({ title: "YOLO · session permission", sample: "ordinary scoped commits/push/PR · destructive confirmations remain · review consent unchanged · reset on reload" }),
+				preview: () => ({ title: "YOLO · session permission", sample: "primary command confirmations bypassed · validated review consent auto-granted · review costs apply · reset on reload" }),
 				action: async () => {
 					if (closed) return;
 					if (!adapter || yoloDisplay === YOLO_DISPLAY.unavailable) {
@@ -2274,7 +2320,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 				label: () => `Session permissions: ${mode.toUpperCase()}${mode === "auto" ? " (beta)" : ""}${permissionDisplay === mode ? " (current)" : ""}`,
 				preview: () => ({ title: "Permissions · current session", sample: mode === "auto"
 					? "independent session-model action checks · extra inference cost · hard safety and native consent remain"
-					: mode === "yolo" ? "ordinary scoped delivery permission · destructive confirmations remain" : "normal checks · overrides an elevated global default" }),
+					: mode === "yolo" ? "primary command confirmations bypassed · validated review consent auto-granted" : "normal checks · overrides an elevated global default" }),
 				action: async () => {
 					if (closed) return;
 					if (!adapter?.setMode || !await adapter.setMode(mode)) ctx.ui.notify("Session mode unchanged — live primary UI unavailable or changed.", "warning");
