@@ -1214,6 +1214,26 @@ const RDD_OFF_REVIEW_GUIDELINES: readonly string[] = [
 const RDD_OFF_REVIEW_DESCRIPTION = "Assess the current changes, or a committed range, and return the verification plan. Read-only; review outcomes never authorize delivery: commit, push, pull-request, and release commands follow ordinary repository policy.";
 const RDD_OFF_HIDDEN_REVIEW_TOOLS: readonly string[] = ["gentle_review_scope", "gentle_review_capture_group", "gentle_review_capture"];
 
+// Fork-only YOLO loadout: the identity prefix drops Spanish-variant lines, and
+// the mandatory workflow block is not injected at all. Normal, Auto and child
+// sessions keep the registered prompt byte for byte.
+const SPANISH_MENTION = /\b(Spanish|español|voseo|Rioplatense)\b/i;
+const YOLO_ASSESS_GUIDELINE = "ASSESS is optional and read-only, needs no lineageId, and never mutates review authority state. Use it when a human requests assessment; its plan is advisory, not an automatic review, delegation, or verifier requirement. Functional checks remain applicable. Native review still requires its own consent and authority, and assessment never authorizes delivery.";
+// Captured from the registered guidance on first sight so a toggled-off YOLO
+// run restores the exact original text instead of a paraphrase.
+let assessGuidelineOriginal: string | undefined;
+function updateYoloAssessGuideline(options: ReviewToolPromptOptions | null | undefined, active: boolean): void {
+	const guidelines = options?.toolGuidelines?.gentle_review;
+	if (!guidelines) return;
+	const index = guidelines.findIndex((guideline) => guideline.startsWith("ASSESS (gentle-pi#662/#668)") || guideline === YOLO_ASSESS_GUIDELINE);
+	if (index === -1) return;
+	const current = guidelines[index];
+	if (current !== YOLO_ASSESS_GUIDELINE) assessGuidelineOriginal = current;
+	const replacement = active ? YOLO_ASSESS_GUIDELINE : assessGuidelineOriginal;
+	if (replacement === undefined) return;
+	options!.toolGuidelines!.gentle_review = guidelines.map((guideline, position) => position === index ? replacement : guideline);
+}
+
 interface ReviewToolPromptOptions {
 	toolSnippets?: Record<string, string>;
 	toolGuidelines?: Record<string, string[]>;
@@ -4546,6 +4566,7 @@ async function runProfilesPanelAction(
 	file: AgentProfilesFile,
 	result: Exclude<ProfilesPanelResult, { type: "close" }>,
 	report: ProfilesPanelReport = {},
+	skipRoutingConfirmation?: () => Promise<boolean>,
 ): Promise<AgentProfilesFile> {
 	switch (result.type) {
 		case "apply": {
@@ -4652,8 +4673,14 @@ async function runProfilesPanelAction(
 						"Apply empty profile?",
 						`Profile "${result.name}" has no routing entries. Applying it will replace global routing in ${sanitizeTerminalText(modelConfigPath(ctx.cwd))} with an empty configuration and return every agent to inherit its default model. Continue?`,
 					];
-				const approved = await ctx.ui.confirm(confirmTitle, confirmMessage);
-				if (!approved) return file;
+				if (skipRoutingConfirmation && await skipRoutingConfirmation()) {
+					// Fork-only YOLO loadout: apply without a routing confirmation; the
+					// disclosure stays visible as a warning notice.
+					ctx.ui.notify(confirmMessage, "warning");
+				} else {
+					const approved = await ctx.ui.confirm(confirmTitle, confirmMessage);
+					if (!approved) return file;
+				}
 			} else {
 				// A populated profile keeps the same abort semantics as the empty and
 				// orchestrator-only dialogs: declining leaves every surface untouched.
@@ -4718,8 +4745,14 @@ async function runProfilesPanelAction(
 							: "its agent routes already match the current global routing";
 						confirmMessage = `Profile "${result.name}" has agent routing entries. Applying it will replace global routing in ${sanitizeTerminalText(modelConfigPath(ctx.cwd))} with this profile's routes: ${changeSummary}${orchestratorEffects}. Continue?`;
 					}
-					const approved = await ctx.ui.confirm(`Apply profile "${result.name}"?`, confirmMessage);
-					if (!approved) return file;
+					if (skipRoutingConfirmation && await skipRoutingConfirmation()) {
+						// Fork-only YOLO loadout: apply without a routing confirmation; the
+						// disclosure stays visible as a warning notice.
+						ctx.ui.notify(confirmMessage, "warning");
+					} else {
+						const approved = await ctx.ui.confirm(`Apply profile "${result.name}"?`, confirmMessage);
+						if (!approved) return file;
+					}
 				}
 			}
 			// Applying spans three files — the store, models.json, and Pi's global
@@ -5112,7 +5145,7 @@ async function runProfilesPanelAction(
 }
 
 /** `/gentle:profiles`: seed or open the store, then loop the panel over one action at a time until it closes. */
-async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): Promise<void> {
+async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession, yoloActive?: () => Promise<boolean>): Promise<void> {
 	const path = profilesFilePath(gentleAiConfigHome());
 	const read = readProfilesFileResult(path);
 	if (read.status === "invalid") {
@@ -5180,7 +5213,7 @@ async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): 
 	);
 	while (result.type !== "close") {
 		const report: ProfilesPanelReport = {};
-		file = await runProfilesPanelAction(ctx, live, path, file, result, report);
+		file = await runProfilesPanelAction(ctx, live, path, file, result, report, yoloActive);
 		selectedName = report.selectedName ?? ("name" in result ? result.name : undefined);
 		result = await showProfilesPanel(
 			ctx,
@@ -9782,6 +9815,25 @@ function createGentleAiExtensionForTesting(
 	// before_agent_start sets it from the pinned line before Pi prepares that
 	// run's tool loadout, so gentle_review's prepareLoadout reads this run's value.
 	let rddOffReviewLoadout = false;
+	// Fork-only YOLO gate: primary process, no nested agent, and a live YOLO
+	// mode. Every YOLO-gated patch below fails closed when this is false.
+	const yoloPatchActive = async (ctx: ExtensionContext): Promise<boolean> => {
+		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return false;
+		if ((processAgentEndSubagentDepth.get(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)) ?? 0) !== 0) return false;
+		try { return await yolo.active(ctx); } catch { return false; }
+	};
+	// The normal/Auto harness block and the YOLO identity block replace one
+	// another across runs: bridge options can be reused, so the previous exact
+	// text is removed before the active variant is appended once.
+	let appendedGentleHarnessPrompt = "";
+	const setGentleHarnessPrompt = (options: (ReviewToolPromptOptions & { appendSystemPrompt?: string }) | null | undefined, text: string): void => {
+		if (!options) return;
+		if (appendedGentleHarnessPrompt) {
+			options.appendSystemPrompt = (options.appendSystemPrompt ?? "").replace(`\n\n${appendedGentleHarnessPrompt}`, "").replace(appendedGentleHarnessPrompt, "");
+		}
+		appendedGentleHarnessPrompt = text.replace(/^\n+/, "");
+		if (appendedGentleHarnessPrompt) appendSystemPromptOnce(options as { appendSystemPrompt: string }, text);
+	};
 	let reminderSessionActive = true;
 	let reminderEpoch = 0;
 	let reminderManager: ExtensionContext["sessionManager"] | undefined;
@@ -9789,6 +9841,7 @@ function createGentleAiExtensionForTesting(
 	pi.on("session_shutdown", (event, context) => {
 		pinnedRddStatusLines.delete(pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey));
 		rddOffReviewLoadout = false;
+		appendedGentleHarnessPrompt = "";
 		auto.reset();
 		yolo.reset(context);
 		reviewSidebar.reset();
@@ -10149,7 +10202,9 @@ function createGentleAiExtensionForTesting(
 						? undefined
 						: permissionAlreadyActive
 							? { kind: "host-session" as const }
-							: await presentReviewConsentUi(ctx, eligiblePending.consent);
+							: ctx.mode === "tui" && ctx.hasUI === true && await yoloPatchActive(ctx)
+								? { kind: "provider" as const, answer: "granted" as const } // Fork-only YOLO loadout: grant this validated candidate only; never create standing permission.
+								: await presentReviewConsentUi(ctx, eligiblePending.consent);
 					if (selection !== undefined) {
 						const confirmedIdentity = await capturePermissionIdentity(ctx, permissionWorkspaceRoot);
 						if (initialEpoch !== undefined && confirmedIdentity !== undefined && sameReviewSessionIdentity(initialIdentity, confirmedIdentity) && reviewSessionPermissionEpoch(confirmedIdentity) === initialEpoch) {
@@ -10331,34 +10386,55 @@ function createGentleAiExtensionForTesting(
 				await resolveRddStatusLine(nativeReviewCli, ctx.cwd, rddStatusSignal, undefined, ctx),
 			);
 		if (rddStatusLine !== undefined) pinnedRddStatusLines.set(subagentDepthKey, rddStatusLine);
-		rddOffReviewLoadout = isPrimarySession && isRddStatusLineOff(rddStatusLine);
+		const yoloPrimaryPrompt = isPrimarySession && await yoloPatchActive(ctx);
+		rddOffReviewLoadout = isPrimarySession && !yoloPrimaryPrompt && isRddStatusLineOff(rddStatusLine);
 		if (rddOffReviewLoadout) applyRddOffReviewPrompt(event.systemPromptOptions as ReviewToolPromptOptions | undefined);
-		const gentlePrompt = rddStatusLine === undefined
-			? ""
-			: `\n\n${buildGentlePrompt(
-					readPersonaMode(ctx.cwd),
-					ctx.cwd,
-					readActiveToolNames(pi),
-					rddStatusLine,
-					ctx.mode,
-				)}`;
-		// gentle-pi#560 / gentle-ai#4056, #4057: inject the mirrored provider
-		// contract bundle's review execution contract for the primary session
-		// only, and only when a native review CLI is actually present.
-		// gentle-shell#1494: skip it while RDD reads off, since no review can
-		// start; on and unknown keep it so the reviewed path never loses it.
-		const reviewContractPrompt =
-			isPrimarySession && nativeReviewCli !== null && !isRddStatusLineOff(rddStatusLine)
-				? (() => {
-					const fragment = loadReviewContractPromptFragment(ctx);
-					return fragment === null ? "" : `\n\n${fragment}`;
-				})()
-				: "";
+		let gentleHarnessPrompt: string;
+		if (yoloPrimaryPrompt) {
+			// Fork-only YOLO loadout: keep identity and continuity, drop the
+			// mandatory workflow block and the review execution contract.
+			const identityAndContinuity = buildGentlePrompt(
+				readPersonaMode(ctx.cwd),
+				ctx.cwd,
+				readActiveToolNames(pi),
+				"",
+				ctx.mode,
+			)
+				.split("\nDefault workflow: Organic Driven Development (MANDATORY)")[0]
+				.split("\n")
+				.filter((line) => !SPANISH_MENTION.test(line))
+				.join("\n");
+			gentleHarnessPrompt = `\n\n${identityAndContinuity}`;
+		} else {
+			const gentlePrompt = rddStatusLine === undefined
+				? ""
+				: `\n\n${buildGentlePrompt(
+						readPersonaMode(ctx.cwd),
+						ctx.cwd,
+						readActiveToolNames(pi),
+						rddStatusLine,
+						ctx.mode,
+					)}`;
+			// gentle-pi#560 / gentle-ai#4056, #4057: inject the mirrored provider
+			// contract bundle's review execution contract for the primary session
+			// only, and only when a native review CLI is actually present.
+			// gentle-shell#1494: skip it while RDD reads off, since no review can
+			// start; on and unknown keep it so the reviewed path never loses it.
+			const reviewContractPrompt =
+				isPrimarySession && nativeReviewCli !== null && !isRddStatusLineOff(rddStatusLine)
+					? (() => {
+						const fragment = loadReviewContractPromptFragment(ctx);
+						return fragment === null ? "" : `\n\n${fragment}`;
+					})()
+					: "";
+			gentleHarnessPrompt = `${gentlePrompt}${reviewContractPrompt}`;
+		}
 		// gentle-shell#1485: pi-claude-bridge drops a handler-returned systemPrompt
 		// and forwards only systemPromptOptions, so the harness is delivered
 		// through the mutable appendSystemPrompt section instead of a replacement.
-		appendSystemPromptOnce(event.systemPromptOptions, `${gentlePrompt}${reviewContractPrompt}`);
-		updateYoloPrompt(event.systemPromptOptions, isPrimarySession && await yolo.active(ctx));
+		setGentleHarnessPrompt(event.systemPromptOptions as ReviewToolPromptOptions & { appendSystemPrompt?: string }, gentleHarnessPrompt);
+		updateYoloAssessGuideline(event.systemPromptOptions as ReviewToolPromptOptions, yoloPrimaryPrompt);
+		updateYoloPrompt(event.systemPromptOptions, yoloPrimaryPrompt);
 		updateAutoPrompt(event.systemPromptOptions, isPrimarySession && await yolo.mode(ctx) === "auto");
 		return undefined;
 	});
@@ -10379,6 +10455,8 @@ function createGentleAiExtensionForTesting(
 			processAgentEndSubagentDepth.set(sessionKey, subagentDepth - 1);
 			return;
 		}
+		// Fork-only YOLO loadout: no automatic review follow-up.
+		if (await yoloPatchActive(ctx)) return;
 		const root = resolveSessionWorktree(ctx.cwd, ctx.cwd)?.root;
 		if (!root) return;
 		let mutation: string | undefined;
@@ -10435,13 +10513,17 @@ function createGentleAiExtensionForTesting(
 		// it carries one notice, after any other patch below.
 		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
 		const primary = permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && (processAgentEndSubagentDepth.get(sessionKey) ?? 0) === 0;
+		// Fork-only YOLO loadout: no automatic context orchestration notice and no
+		// automatic delivery slicing; the tool result itself is unchanged.
+		const yoloPatch = primary ? await yoloPatchActive(ctx) : false;
 		let notice: string | undefined;
-		try { notice = primary ? contextBackstopSignal(sessionKey, ctx.getContextUsage?.()) : undefined; } catch { notice = undefined; }
+		try { notice = primary && !yoloPatch ? contextBackstopSignal(sessionKey, ctx.getContextUsage?.()) : undefined; } catch { notice = undefined; }
 		const withNotice = (patch: ToolResultEventResult | undefined) => notice ? appendContextBackstopNotice(event, patch, notice) : patch;
 		// Harness roadmap T4: a parent commit reports the branch's authored
 		// changed lines so delivery slicing reads a number, not an estimate.
 		if (SHELL_COMMAND_TOOLS.has(event.toolName)) {
 			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD === "1") return undefined;
+			if (yoloPatch) return withNotice(undefined);
 			try { return withNotice(await commitSliceToolResult(event, ctx.cwd)); } catch { return withNotice(undefined); }
 		}
 		await recordWriteResult(event, ctx);
@@ -10507,6 +10589,11 @@ function createGentleAiExtensionForTesting(
 			return { block: true, reason: "Permission mode changed during tool admission. This action was not run; retry under the current mode." };
 		}
 		const autoGate = permissionMode === "auto" ? gate : undefined;
+		// Fork-only YOLO loadout: primary calls skip the command confirmation gate
+		// entirely, destructive commands included. Auto and nonprimary calls keep
+		// the original policy. Uses the fresh epoch-checked mode, not the earlier
+		// admission snapshot.
+		if (primaryToolCall && permissionMode === "yolo") return autoGate?.();
 		return await confirmCommand(command, ctx, pi.events, herdrLifecycle, yoloActive, autoGate);
 	});
 
@@ -10535,7 +10622,7 @@ function createGentleAiExtensionForTesting(
 	pi.registerCommand("gentle:profiles", {
 		description: "Create, switch, and manage global agent-model profiles for el Gentleman.",
 		handler: async (_args, ctx) => {
-			await handleProfilesCommand(ctx, pi);
+			await handleProfilesCommand(ctx, pi, () => yoloPatchActive(ctx));
 		},
 	});
 

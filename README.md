@@ -32,6 +32,11 @@
 
 <p align="center">Your terminal can run an agent. Your workspace should help you lead it.<br><strong>gentle-shell is your coding agent, bringing your changes, tasks, and engineering workflow together—built for Pi.</strong></p>
 
+> **Personal fork:** this branch (`custom/local-patches`) is maintained at
+> [`lostofctrl/gentle-shell`](https://github.com/lostofctrl/gentle-shell). Its
+> YOLO-only permission changes and composer customizations are described in
+> [`docs/CUSTOM-FORK.md`](docs/CUSTOM-FORK.md).
+
 <div align="center">
  <h3>🎬 See it in action</h3>
 

@@ -76,7 +76,7 @@ function session(t: TestContext, child: boolean) {
 	});
 	const handlers = new Map<string, Handler>();
 	const pi = { on: (name: string, handler: Handler) => { handlers.set(name, handler); }, events: { on() {}, emit() {} }, registerCommand() {}, registerTool() {} } as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null, processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0" } })(pi);
+	createGentleAiExtension({ nativeReviewCli: null, processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0", GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME } })(pi);
 	let usage: ContextUsage | undefined = { tokens: 10_000, contextWindow: 1_000_000, percent: 1 };
 	const sessionManager = { getSessionId: () => "session-backstop", getCwd: () => cwd, getEntries: () => [], getBranch: () => [] };
 	const ctx = { cwd, hasUI: false, ui: { notify() {} }, sessionManager, getContextUsage: () => usage } as unknown as ExtensionContext;

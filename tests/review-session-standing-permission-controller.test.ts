@@ -296,7 +296,7 @@ function controllerHarness(cwd: string, processEnv: NodeJS.ProcessEnv = {}, opti
 			return { kind: "started", start: { lineageId: `lineage-${answers.length}`, state: action === "blocked-scope-action" ? "unreviewed" : "approved", riskLevel: "high", selectedLenses: [], changedFiles: 1, changedLines: 2, correctionBudget: 0, action, lensesRequired: false, riskReasons: [] } };
 		},
 	} as unknown as NativeReviewCli;
-	createGentleAiExtension({ nativeReviewCli: native, candidateViews: new CandidateViewRegistry(), processEnv, childStandingReviewPermissionClient: options.childStandingReviewPermissionClient })({
+	createGentleAiExtension({ nativeReviewCli: native, candidateViews: new CandidateViewRegistry(), processEnv: { GENTLE_PI_CONFIG_HOME: join(cwd, ".gentle-config"), ...processEnv }, childStandingReviewPermissionClient: options.childStandingReviewPermissionClient })({
 		on(name: string, handler: RegisteredEvent) { events.set(name, handler); },
 		registerCommand(name: string, definition: RegisteredCommand) { commands.set(name, definition); },
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },

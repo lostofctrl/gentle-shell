@@ -61,7 +61,7 @@ function harness(child: boolean, cwd: string) {
 	});
 	const candidateViews = { sweepOrphans: (path: string) => { sweeps.push(path); }, cleanupAll() {} };
 	createGentleAiExtension({
-		processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0" },
+		processEnv: { GENTLE_PI_AGENTS_CHILD: child ? "1" : "0", GENTLE_AI_TELEMETRY: "0", GENTLE_PI_CONFIG_HOME: join(cwd, ".gentle-config") },
 		nativeReviewCli: nativeReviewCli as never,
 		candidateViews: candidateViews as never,
 		childStandingReviewPermissionClient: { requestAuthorization: async () => false, close() {} },

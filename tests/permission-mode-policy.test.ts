@@ -49,12 +49,12 @@ test("superseded YOLO enables stay silent while genuine activation failure warns
  assert.equal(captures.length, 2);
  captures[1].release(); await newer;
  captures[0].release(); await older;
- assert.deepEqual(h.notices, ["🚀 YOLO ON 🔥 — destructive confirmations remain"]);
+ assert.deepEqual(h.notices, ["🚀 YOLO ON 🔥 — primary command confirmations bypassed"]);
  t.mock.restoreAll(); syncBuiltinESMExports();
  assert.equal(await h.controller.mode(h.context), "yolo");
  Object.assign(h.context, { hasUI: false, mode: "json" });
  await h.controller.humanAction("on", h.context);
- assert.deepEqual(h.notices, ["🚀 YOLO ON 🔥 — destructive confirmations remain",
+ assert.deepEqual(h.notices, ["🚀 YOLO ON 🔥 — primary command confirmations bypassed",
   "YOLO OFF — activation requires an interactive primary TUI session and an identifiable workspace."]);
 });
 

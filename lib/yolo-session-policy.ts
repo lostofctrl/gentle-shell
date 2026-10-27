@@ -9,12 +9,15 @@ export const MODE_STATUS_KEY = "gentle:mode";
 export const AUTO_MODE_NOTICE = "Auto uses additional model calls with separate usage accounting; hard safety and independent consent remain.";
 
 export const YOLO_STATUS_KEY = "gentle:yolo";
-export const YOLO_STATUS_TEXT = "🚀 YOLO ON 🔥 — destructive confirmations remain";
+export const YOLO_STATUS_TEXT = "🚀 YOLO ON 🔥 — primary command confirmations bypassed";
+export const YOLO_STATUS_ICON = "🚀";
 export const YOLO_DIRECTIVE = `<gentle-yolo-session>
 YOLO session standing permission is ON, authorized by the human for this live primary session and canonical workspace (directly or through a trusted global default).
+In this fork, an active primary YOLO session also omits the mandatory ODD workflow prompt (identity and continuity remain), skips automatic review follow-up, context-backstop notices and delivery-slice notices, applies agent-profile routing without a routing confirmation, and answers an eligible validated native review consent once per candidate without creating standing review permission.
 Qualify the default commit, push and PR confirmation clauses: for ordinary already-scoped implementation, checks, commits, non-force pushes and PR creation, this activation supplies standing permission instead of repeated permission questions. Make ordinary reversible implementation choices without needless interviews.
-This does NOT override explicit human restrictions, repository policy, project trust, configured confirmations or blocks, or the authorized task scope. Ask before scope expansion, privacy-sensitive disclosure, genuinely unresolved consequential product choices, or ambiguous destinations or credentials. Never invent destinations or credentials.
-Destructive/data-loss confirmations remain mandatory and independent. Never auto-answer ask_user tools, provider consent, maintenance/recovery authorization or opaque-token decisions. Review standing permission and RDD are unchanged. Children remain bounded by their delegated task; they receive no independent delivery grant or YOLO inheritance.
+Destructive shell commands are not confirmed in an active primary YOLO session, so never run a destructive or data-loss action unless the human explicitly asked for it; this fork-level bypass never covers child or nested agents.
+This does NOT override explicit human restrictions, repository policy, project trust, or the authorized task scope. Ask before scope expansion, privacy-sensitive disclosure, genuinely unresolved consequential product choices, or ambiguous destinations or credentials. Never invent destinations or credentials.
+Never auto-answer ask_user tools, maintenance/recovery authorization or opaque-token decisions. Native review still requires provider validation and authority; an automatic YOLO answer never creates standing host permission. Children remain bounded by their delegated task; they receive no independent delivery grant or YOLO inheritance.
 </gentle-yolo-session>`;
 
 /** Legacy standalone API; separate from review grants and their registry. */
@@ -130,9 +133,9 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	};
 	const publish = (ctx: ExtensionContext): void => {
 		const yolo = liveMode === "yolo";
-		try { ctx.ui.setStatus(YOLO_STATUS_KEY, yolo ? YOLO_STATUS_TEXT : undefined); } catch { /* display only */ }
-		try { ctx.ui.setWidget(YOLO_STATUS_KEY, yolo ? [YOLO_STATUS_TEXT] : undefined); } catch { /* display only */ }
-		try { ctx.ui.setStatus(MODE_STATUS_KEY, `Permissions: ${liveMode.toUpperCase()}`); } catch { /* display only */ }
+		try { ctx.ui.setStatus(YOLO_STATUS_KEY, yolo ? YOLO_STATUS_ICON : undefined); } catch { /* display only */ }
+		try { ctx.ui.setWidget(YOLO_STATUS_KEY, yolo ? [YOLO_STATUS_ICON] : undefined); } catch { /* display only */ }
+		try { ctx.ui.setStatus(MODE_STATUS_KEY, yolo ? undefined : `Permissions: ${liveMode.toUpperCase()}`); } catch { /* display only */ }
 	};
 	const changed = (ctx: ExtensionContext): void => {
 		generation += 1; publish(ctx);
@@ -294,14 +297,14 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 		},
 	});
 	pi.registerCommand("gentle:yolo", {
-		description: "Ordinary development/delivery permission (enable|disable|status); no argument opens a menu. Destructive confirmations remain.",
+		description: "Ordinary development/delivery permission (enable|disable|status); no argument opens a menu. In this fork, primary YOLO also skips command confirmation (destructive included), the mandatory workflow prompt, automatic review-follow-up/backstop/slice notices, profile routing confirmations, and asks for validated review consent per candidate instead of a dialog.",
 		handler: async (args, ctx) => {
 			let action = args.trim() || "status";
 			let current = () => true;
 			if (!args.trim() && ctx.hasUI && typeof ctx.ui.select === "function") {
 				current = bindCurrent(ctx);
 				const state = await active(ctx) ? YOLO_DISPLAY.on : YOLO_DISPLAY.off;
-				const selected = await ctx.ui.select(`🚀 Gentle YOLO 🔥 — full speed, destructive actions still ask (current: ${state})`, ["enable", "disable", "status"]);
+				const selected = await ctx.ui.select(`🚀 Gentle YOLO 🔥 — full speed, primary command confirmations bypassed (current: ${state})`, ["enable", "disable", "status"]);
 				if (selected === undefined) return;
 				action = selected;
 			}

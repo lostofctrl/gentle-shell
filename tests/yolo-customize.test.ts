@@ -133,14 +133,13 @@ for (const order of ["owner-first", "shell-first"]) test(`Editor YOLO menu and s
 	const open = await h.open(); const view = h.view(); selectYolo(view);
 	const initial = text(view);
 	assert.match(initial, /Vim: disable[\s\S]*YOLO: OFF · session only/);
-	assert.match(initial, /ordinary scoped commits\/push\/PR/);
-	assert.match(initial, /destructive confirmations remain/);
-	assert.match(initial, /review consent unchanged/);
+	assert.match(initial, /primary command confirmations bypassed/);
+	assert.match(initial, /validated review consent auto-granted/);
 	assert.match(initial, /reset on reload/);
 	assert.equal(await h.controller().active(h.ctx), false, "render/preview/navigation never grant");
 	await h.apply("\r");
 	assert.match(text(view), /YOLO: ON · session only/);
-	assert.equal(h.statuses.get(yolo.YOLO_STATUS_KEY), yolo.YOLO_STATUS_TEXT);
+	assert.equal(h.statuses.get(yolo.YOLO_STATUS_KEY), yolo.YOLO_STATUS_ICON);
 	await h.command("disable"); await settle(() => /YOLO: OFF/.test(text(view)));
 	assert.equal(h.widgets.get(yolo.YOLO_STATUS_KEY), undefined);
 	await h.command("enable"); await settle(() => /YOLO: ON/.test(text(view)));

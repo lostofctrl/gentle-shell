@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { captureReviewSessionIdentity, grantReviewSessionPermission, hasReviewSessionPermission, revokeReviewSessionPermission } from "../lib/review-session-standing-permission.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
-import { YOLO_STATUS_TEXT } from "../lib/yolo-session-policy.ts";
+import { YOLO_STATUS_ICON, YOLO_STATUS_TEXT } from "../lib/yolo-session-policy.ts";
 
-const ON_TEXT = "🚀 YOLO ON 🔥 — destructive confirmations remain";
+const ON_TEXT = "🚀 YOLO ON 🔥 — primary command confirmations bypassed";
 const USAGE = "Use /gentle:yolo enable|disable|status. State unchanged.";
 const STALE_MENU = "YOLO unchanged — the session changed while the menu was open.";
-const menuTitle = (state: "ON" | "OFF") => `🚀 Gentle YOLO 🔥 — full speed, destructive actions still ask (current: ${state})`;
+const menuTitle = (state: "ON" | "OFF") => `🚀 Gentle YOLO 🔥 — full speed, primary command confirmations bypassed (current: ${state})`;
 
 // An empty env would resolve the developer's real ~/.pi/gentle-ai and inherit its persisted mode default.
 const isolatedConfigHomes: string[] = [];
@@ -77,12 +77,12 @@ test("human command enable/disable/status/invalid and status/widget clearing", a
 	assert.equal(h.tools.some((name) => name.includes("yolo")), false);
 	await h.command("status"); assert.match(h.notices.at(-1)!, /OFF/);
 	await h.command("enable");
-	assert.equal(h.statuses.get("gentle:yolo"), ON_TEXT);
-	assert.deepEqual(h.widgets.get("gentle:yolo"), [ON_TEXT]);
+	assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON);
+	assert.deepEqual(h.widgets.get("gentle:yolo"), [YOLO_STATUS_ICON]);
 	for (const invalid of ["invalid", "on", "off", "toggle"]) {
 		await h.command(invalid);
 		assert.equal(h.notices.at(-1), USAGE);
-		assert.equal(h.statuses.get("gentle:yolo"), ON_TEXT, `${invalid} leaves state unchanged`);
+		assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON, `${invalid} leaves state unchanged`);
 	}
 	await h.command("status"); assert.match(h.notices.at(-1)!, /ON/);
 	await h.command("disable"); assert.equal(h.statuses.get("gentle:yolo"), undefined);
@@ -96,7 +96,7 @@ test("no argument without a select-capable UI reports status and never toggles",
 	assert.equal(h.statuses.get("gentle:yolo"), undefined);
 	await h.command("enable");
 	await h.command(""); assert.equal(h.notices.at(-1), ON_TEXT);
-	assert.equal(h.statuses.get("gentle:yolo"), ON_TEXT);
+	assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON);
 	let prompts = 0;
 	h.setSelect(async () => { prompts++; return "disable"; });
 	Object.assign(h.ctx, { hasUI: false });
@@ -118,10 +118,10 @@ test("no-argument menu shows the fire title and live state; only an explicit sel
 	answer = "status"; await h.command("");
 	assert.equal(h.notices.at(-1), "YOLO OFF"); assert.equal(h.statuses.get("gentle:yolo"), undefined);
 	answer = "enable"; await h.command("");
-	assert.equal(h.statuses.get("gentle:yolo"), ON_TEXT); assert.equal(h.notices.at(-1), ON_TEXT);
+	assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON); assert.equal(h.notices.at(-1), ON_TEXT);
 	answer = undefined; await h.command("");
 	assert.equal(prompts.at(-1)!.title, menuTitle("ON"));
-	assert.equal(h.statuses.get("gentle:yolo"), ON_TEXT, "cancel leaves ON unchanged");
+	assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON, "cancel leaves ON unchanged");
 	answer = "disable"; await h.command("");
 	assert.equal(h.statuses.get("gentle:yolo"), undefined); assert.equal(h.notices.at(-1), "YOLO OFF");
 	const shown = prompts.length;
@@ -148,9 +148,9 @@ test("child, headless, RPC and nonexistent workspace cannot activate", async () 
 		if (variant === "headless") Object.assign(h.ctx, { hasUI: false });
 		if (variant === "rpc") Object.assign(h.ctx, { mode: "rpc" });
 		if (variant === "no-workspace") Object.assign(h.ctx, { cwd: "/nonexistent-gentle-workspace" });
-		await h.command("enable"); assert.notEqual(h.statuses.get("gentle:yolo"), ON_TEXT);
+		await h.command("enable"); assert.notEqual(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON);
 		h.setSelect(async () => "enable");
-		await h.command(""); assert.notEqual(h.statuses.get("gentle:yolo"), ON_TEXT, `${variant} menu enable fails closed`);
+		await h.command(""); assert.notEqual(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON, `${variant} menu enable fails closed`);
 	}
 });
 
@@ -185,25 +185,34 @@ test("session loss and shutdown (including reload) revoke visible state", async 
 	await h.command("status"); assert.match(h.notices.at(-1)!, /OFF/);
 });
 
-test("active YOLO waives only ordinary push after full destructive/guard evaluation", async () => {
+test("active primary YOLO skips the whole command gate; Normal and nonprimary calls keep it", async () => {
 	const h = harness();
 	const call = (command: string) => h.emit("tool_call", { toolName: "bash", input: { command } });
 	assert.deepEqual(await call("git push origin main"), { block: true, reason: "Gentle AI safety policy blocked the command because it was not confirmed." });
 	await h.command("enable");
-	assert.equal(await call("git push origin main"), undefined);
-	assert.equal(h.confirmations(), 1);
-	// gentle-shell#2172: reversible compound delivery is waived too.
-	for (const command of ["git commit -m 'fix: x' && git push -u origin feature/x", "git push origin main && gh pr create --fill", "git -C /other push origin main", "git rebase origin/main && git push"]) {
+	// Fork-only YOLO loadout: the primary command path never reaches the
+	// confirmation gate, destructive commands included.
+	for (const command of [
+		"git push origin main",
+		"git commit -m 'fix: x' && git push -u origin feature/x",
+		"git push origin main && gh pr create --fill",
+		"git -C /other push origin main",
+		"git rebase origin/main && git push",
+		"git push origin main && rm -rf ./data",
+		`sh -c "psql -c 'DROP TABLE users'"`,
+		"git push origin main && git rebase -i main",
+		"git push --force origin main",
+		"git push origin main && npm publish",
+		"git push origin :main",
+		"sh -c 'git push origin main'",
+	]) {
 		assert.equal(await call(command), undefined, command);
 	}
-	assert.equal(h.confirmations(), 1, "waived commands never reach the confirmation dialog");
-	for (const command of ["git push origin main && rm -rf ./data", `sh -c "psql -c 'DROP TABLE users'"`, "git push origin main && git rebase -i main", "git push --force origin main", "git push origin main && npm publish", "git push origin :main", "sh -c 'git push origin main'"]) {
-		assert.ok(await call(command), command);
-	}
+	assert.equal(h.confirmations(), 1, "YOLO commands never reach the confirmation dialog");
 	await h.command("disable"); assert.ok(await call("git push origin main"));
 });
 
-test("active YOLO waives a push with harmless redirections and a read-only filter; Normal and children still ask", async () => {
+test("active primary YOLO skips redirection and filter gates too; Normal and children still ask", async () => {
 	const command = "git push -u origin feat/x 2>&1 | tail -5";
 	const call = (h: ReturnType<typeof harness>, input: string) => h.emit("tool_call", { toolName: "bash", input: { command: input } });
 	const h = harness();
@@ -212,16 +221,16 @@ test("active YOLO waives a push with harmless redirections and a read-only filte
 	await h.command("enable");
 	assert.equal(await call(h, command), undefined);
 	assert.equal(await call(h, "git push origin main 2>&1"), undefined);
-	assert.equal(h.confirmations(), 1, "waived pushes never reach the confirmation dialog");
-	for (const asks of ["git push origin main | sh", "git push origin main > out.txt", "git push origin main 2>&1 | tee out"]) {
-		assert.ok(await call(h, asks), asks);
+	assert.equal(h.confirmations(), 1, "YOLO commands never reach the confirmation dialog");
+	for (const waived of ["git push origin main | sh", "git push origin main > out.txt", "git push origin main 2>&1 | tee out"]) {
+		assert.equal(await call(h, waived), undefined, waived);
 	}
 	const child = harness({ GENTLE_PI_AGENTS_CHILD: "1" });
 	await child.command("enable");
-	assert.ok(await call(child, command), "children never receive the waiver");
+	assert.ok(await call(child, command), "children never receive the command bypass");
 });
 
-test("active command path preserves configured push confirmations and blocks, including legacy env override", async () => {
+test("active primary YOLO bypasses configured push confirmations and blocks; Normal keeps the default gate", async () => {
 	const configHome = mkdtempSync(join(tmpdir(), "gentle-yolo-config-"));
 	const previousHome = process.env.GENTLE_PI_CONFIG_HOME;
 	const previousAutonomy = process.env.GENTLE_PI_AUTONOMOUS_MODE;
@@ -233,10 +242,13 @@ test("active command path preserves configured push confirmations and blocks, in
 			for (const action of ["confirm", "block"]) {
 				writeFileSync(join(configHome, "runtime-guardrails.json"), JSON.stringify({ autonomousMode: false, guardedCommands: { gitPush: action } }));
 				const h = harness(); await h.command("enable");
-				assert.ok(await h.emit("tool_call", { toolName: "bash", input: { command: "git push origin main" } }));
-				assert.equal(h.confirmations(), action === "confirm" ? 1 : 0);
+				assert.equal(await h.emit("tool_call", { toolName: "bash", input: { command: "git push origin main" } }), undefined, `primary YOLO skips the configured ${action}`);
+				assert.equal(h.confirmations(), 0, "primary YOLO never opens a confirmation dialog");
 			}
 		}
+		delete process.env.GENTLE_PI_AUTONOMOUS_MODE;
+		const normal = harness();
+		assert.ok(await normal.emit("tool_call", { toolName: "bash", input: { command: "git push origin main" } }), "Normal still gates an ordinary push");
 	} finally {
 		if (previousHome === undefined) delete process.env.GENTLE_PI_CONFIG_HOME; else process.env.GENTLE_PI_CONFIG_HOME = previousHome;
 		if (previousAutonomy === undefined) delete process.env.GENTLE_PI_AUTONOMOUS_MODE; else process.env.GENTLE_PI_AUTONOMOUS_MODE = previousAutonomy;
@@ -293,20 +305,22 @@ test("a session replaced while the menu is open cannot receive the enable choice
 	assert.equal(h.notices.at(-1), "YOLO OFF");
 });
 
-test("bash_background goes through the same command confirmation and YOLO waiver as bash", async () => {
+test("bash_background follows the same Normal gate and primary YOLO bypass as bash", async () => {
 	const h = harness();
 	const call = (command: string) => h.emit("tool_call", { toolName: "bash_background", input: { command } });
 	assert.deepEqual(await call("git push origin main"), { block: true, reason: "Gentle AI safety policy blocked the command because it was not confirmed." });
+	assert.ok(await call("git push origin main && rm -rf ./data"), "Normal blocks the destructive compound");
 	await h.command("enable");
 	assert.equal(await call("git push origin main"), undefined);
-	assert.ok(await call("git push origin main && rm -rf ./data"), "YOLO never waives a destructive command");
+	assert.equal(await call("git push origin main && rm -rf ./data"), undefined, "primary YOLO skips the command gate, destructive included");
 });
 
-test("monitor goes through the same command confirmation and YOLO waiver as bash", async () => {
+test("monitor follows the same Normal gate and primary YOLO bypass as bash", async () => {
 	const h = harness();
 	const call = (command: string) => h.emit("tool_call", { toolName: "monitor", input: { command, timeout_seconds: 60 } });
 	assert.deepEqual(await call("git push origin main"), { block: true, reason: "Gentle AI safety policy blocked the command because it was not confirmed." });
+	assert.ok(await call("git push origin main && rm -rf ./data"), "Normal blocks the destructive compound");
 	await h.command("enable");
 	assert.equal(await call("git push origin main"), undefined);
-	assert.ok(await call("git push origin main && rm -rf ./data"), "YOLO never waives a destructive command");
+	assert.equal(await call("git push origin main && rm -rf ./data"), undefined, "primary YOLO skips the command gate, destructive included");
 });

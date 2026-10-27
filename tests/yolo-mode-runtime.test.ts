@@ -9,7 +9,7 @@ import gentleShell from "../extensions/gentle-shell.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { createEventBus, createExtensionRuntime, ExtensionRunner, SessionManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
-import { discoverYoloUiAdapter, registerYoloSessionPolicy, YOLO_STATUS_KEY, YOLO_STATUS_TEXT } from "../lib/yolo-session-policy.ts";
+import { discoverYoloUiAdapter, registerYoloSessionPolicy, YOLO_STATUS_KEY, YOLO_STATUS_ICON, YOLO_STATUS_TEXT } from "../lib/yolo-session-policy.ts";
 import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
 
 // An empty env would resolve the developer's real ~/.pi/gentle-ai and inherit its persisted mode default.
@@ -33,7 +33,7 @@ test("complete Gentle AI extension registers and executes YOLO through the actua
 	assert.equal(runner.getCommand("yolo"), undefined, "bare yolo command is not registered");
 	const command = runner.getCommand("gentle:yolo"); assert.ok(command);
 	await command.handler("enable", runner.createCommandContext());
-	assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_TEXT);
+	assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_ICON);
 	await command.handler("disable", runner.createCommandContext());
 	assert.equal(statuses.get(YOLO_STATUS_KEY), undefined);
 	await command.handler("enable", runner.createCommandContext());
@@ -79,7 +79,7 @@ test("SDK-loaded YOLO command resets across actual runner lifecycle dispatch and
 	await runner.emit({ type: "session_start", reason: "startup" });
 	await command("status"); assert.equal(statuses.get(YOLO_STATUS_KEY), undefined);
 	for (const reason of ["reload", "new", "resume", "fork", "quit"] as const) {
-		await command("enable"); assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_TEXT);
+		await command("enable"); assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_ICON);
 		await runner.emit({ type: "session_shutdown", reason });
 		assert.equal(statuses.get(YOLO_STATUS_KEY), undefined);
 		assert.equal(widgets.get(YOLO_STATUS_KEY), undefined);
@@ -164,7 +164,7 @@ for (const shellFirst of [false, true]) test(`SDK loads both extensions on one b
 	const onRendered = rendered(/YOLO: ON/);
 	view.handleInput?.("\r");
 	await onRendered;
-	assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_TEXT);
+	assert.equal(statuses.get(YOLO_STATUS_KEY), YOLO_STATUS_ICON);
 	assert.match(text(), /YOLO: ON/);
 	await Promise.all([rendered(/YOLO: OFF/), command.handler("disable", ctx)]);
 	assert.equal(statuses.get(YOLO_STATUS_KEY), undefined);
