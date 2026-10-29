@@ -13,7 +13,7 @@ import test, { after, afterEach, before, mock } from "node:test";
 import type { TestContext } from "node:test";
 import { generateUnifiedPatch, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
-import { visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Container, Text, visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sidebarState } from "../lib/shell-sidebar.ts";
 import { CHILD_PACKAGE_INJECTION_ENV, encodeChildPackageInjection } from "../lib/child-package-injection.ts";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, agentResultPreview, answerThroughUi, childContextExtensionPaths, completionText, createDefaultSessionTransport, legacySubagentsInstalled, PARENT_WAKE_GRACE_MS, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
@@ -198,7 +198,7 @@ function fakePi(initialProvider: string = "claude-bridge") {
 }
 
 function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (title: string, message: string) => Promise<boolean> = async () => true, inputResult: (title: string, placeholder: string | undefined) => Promise<string | undefined> = async () => undefined, overlayTui: { terminal: { rows: number }; requestRender(): void } = { terminal: { rows: 30 }, requestRender() {} }, selectResult: (title: string, options: string[]) => Promise<string | undefined> = async (_title, options) => options[0]) {
-	const widgets = new Map<string, (tui: unknown, theme: unknown) => { render(width: number): string[] }>();
+	const widgets = new Map<string, (tui: unknown, theme: unknown) => Component>();
 	const dialogs: string[] = [];
 	const overlays: Overlay[] = [];
 	const customCompletions: unknown[] = [];
@@ -220,7 +220,7 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 					const component = factory(overlayTui, plainTheme, {}, done);
 					overlays.push(component);
 				}),
-			setWidget(key: string, content: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined) {
+			setWidget(key: string, content: ((tui: unknown, theme: unknown) => Component) | undefined) {
 				if (content === undefined) widgets.delete(key);
 				else widgets.set(key, content);
 			},
@@ -243,7 +243,8 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 		const factory = widgets.get("gentle-agents");
 		return factory ? factory(tui, plainTheme).render(72).map(stripAnsi) : undefined;
 	};
-	return { ctx, widget, dialogs, overlays, customCompletions, customOptions };
+	const widgetComponent = () => widgets.get("gentle-agents")?.(tui, plainTheme);
+	return { ctx, widget, widgetComponent, dialogs, overlays, customCompletions, customOptions };
 }
 
 for (const scenario of ["background", "task", "append-failure", "overflow", "bytes", "replacement", "task-replacement", "unsafe-id", "no-transport"] as const) {
@@ -3868,6 +3869,74 @@ test("a task-mode child's dialog reaches the host UI and the answer goes back to
 	assert.deepEqual(await answerThroughUi(ctx.ui, { id: "u3", method: "input", title: "Name" }, {}), { cancelled: true });
 	assert.deepEqual(await answerThroughUi(ctx.ui, { id: "u4", method: "editor", title: "Edit" }, {}), { value: "edited" });
 	assert.deepEqual(await answerThroughUi(undefined, { id: "u5", method: "select", title: "x" }, {}), { cancelled: true });
+});
+
+test("Agents card clicks open the full panel, ignore non-clicks and spacers, and do not stack overlays", async () => {
+	const h = fakePi(), runtime = deps();
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx, widgetComponent, overlays, customOptions, customCompletions } = fakeContext();
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("card", { agent: "explore", task: "Clickable card", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const card = widgetComponent()!;
+	const root = new Container();
+	root.addChild(new Text("Chat above the widget", 0, 0));
+	root.addChild(card);
+	const lines = root.render(80).slice(1);
+	assert.ok(lines.length > 1);
+	const dispatch = (type: TuiMouseEvent["type"], button: TuiMouseEvent["button"], y = 1) =>
+		root.handleMouse(mouse(type, button, 4, y + 1, 80, root.render(80).length));
+	for (const [type, button] of [["click", "right"], ["click", "middle"], ["press", "left"], ["wheel", "none"]] as const) {
+		assert.equal(dispatch(type, button), undefined);
+	}
+	assert.equal(dispatch("click", "left", lines.length - 1), undefined, "the trailing spacer is not clickable");
+	assert.equal(overlays.length, 0);
+	assert.equal(dispatch("click", "left")?.handled, true);
+	assert.equal(overlays.length, 1);
+	assert.deepEqual(customOptions[0], { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0, anchor: "center" } });
+	assert.match(overlays[0].render(80).map(stripAnsi).join("\n"), /Subagent explore/);
+	dispatch("click", "left", 0);
+	assert.equal(overlays.length, 1, "repeated clicks cannot stack panels");
+	overlays[0].handleInput("\x1b");
+	await tick();
+	assert.deepEqual(customCompletions, [null]);
+	await h.shortcuts.get(agentsCollapseKey({}))!.handler(ctx);
+	assert.match(root.render(80).map(stripAnsi).join("\n"), /expand/, "the card is collapsed before reopening");
+	assert.equal(dispatch("click", "left", 0)?.handled, true, "the collapsed header can reopen the panel after closing");
+	assert.equal(overlays.length, 2);
+	overlays[1].handleInput("\x1b");
+});
+
+test("empty Agents cards have no clickable area", async () => {
+	const h = fakePi(), runtime = deps();
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx, widgetComponent, overlays } = fakeContext();
+	await h.fire("session_start", ctx);
+	const card = widgetComponent()!;
+	assert.deepEqual(card.render(80), []);
+	assert.equal(card.handleMouse?.(mouse("click", "left", 0, 0, 80, 1)), undefined);
+	assert.equal(overlays.length, 0);
+});
+
+test("Agents card reports overlay failures and allows retry", async () => {
+	const h = fakePi(), runtime = deps();
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx, widgetComponent, dialogs, overlays } = fakeContext();
+	await h.fire("session_start", ctx);
+	await h.tools.get("subagent_run")!.execute("card-error", { agent: "explore", task: "Clickable card", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const card = widgetComponent()!;
+	const lines = card.render(80);
+	const custom = ctx.ui.custom;
+	ctx.ui.custom = async () => { throw new Error("overlay unavailable"); };
+	const click = mouse("click", "left", 4, 0, 80, lines.length);
+	assert.deepEqual(card.handleMouse?.(click), { handled: true, render: true });
+	await tick();
+	assert.ok(dialogs.includes("notify:Could not open the agents panel: overlay unavailable"));
+	ctx.ui.custom = custom;
+	card.handleMouse?.(click);
+	assert.equal(overlays.length, 1);
+	overlays[0].handleInput("\x1b");
 });
 
 test("AgentsView production composition observes each pointer event once and accepts only left clicks", async () => {

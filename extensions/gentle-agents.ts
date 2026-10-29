@@ -58,6 +58,7 @@ import { OrchestratorScopeCache, type RepositoryFact } from "../lib/orchestrator
 import { createRpcActivityPublisher, type RpcActivityPublisher } from "../lib/agents-rpc-publisher.ts";
 import { isInteractiveRpcHost } from "../lib/rpc-host.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
+import { NativePointerRegion } from "../lib/native-pointer-region.ts";
 import { AGENTS_GLYPH, renderAgentsCard, widgetExpiryMs, widgetRows } from "../lib/agents-widget.ts";
 import { CARD_TONE, renderCard } from "../lib/shell-card.ts";
 import { openInExternalEditor } from "./gentle-shell.ts";
@@ -1599,18 +1600,29 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		tickClock();
 		// Agents is not a rail part: the fullscreen sidebar only suppresses
 		// bottom components registered through sidebarPart, and this widget is
-		// the only Agents surface in every mode, so it stays a plain component.
+		// the only Agents surface in every mode, so it stays outside the rail.
 		ui?.setWidget(AGENTS_WIDGET_KEY, (tui, theme) => {
 			host = tui;
 			sidebarTui = tui;
-			return {
+			let cardRows = 0;
+			return new NativePointerRegion({
 				render(width: number) {
-					if (!agentsVisible) return [];
-					const lines = renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: widgetRows(tui.terminal?.rows), viewKey });
+					const lines = agentsVisible ? renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: widgetRows(tui.terminal?.rows), viewKey }) : [];
+					cardRows = lines.length;
 					return lines.length === 0 ? [] : [...lines, ""];
 				},
-				invalidate() {},
-			};
+				invalidate() { cardRows = 0; },
+			}, {
+				onClick(event) {
+					if (event.button !== "left" || !agentsVisible || event.y >= cardRows) return undefined;
+					if (overlays.size === 0) {
+						void openOverlay(ctx).catch((error) => {
+							ctx.ui.notify(`Could not open the agents panel: ${error instanceof Error ? error.message : String(error)}`, "warning");
+						});
+					}
+					return { handled: true, render: true };
+				},
+			});
 		});
 	};
 
