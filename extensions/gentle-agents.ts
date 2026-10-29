@@ -58,6 +58,7 @@ import { OrchestratorScopeCache, type RepositoryFact } from "../lib/orchestrator
 import { createRpcActivityPublisher, type RpcActivityPublisher } from "../lib/agents-rpc-publisher.ts";
 import { isInteractiveRpcHost } from "../lib/rpc-host.ts";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
+import { renderJobsCard } from "../lib/jobs-widget.ts";
 import { NativePointerRegion } from "../lib/native-pointer-region.ts";
 import { AGENTS_GLYPH, renderAgentsCard, widgetExpiryMs, widgetRows } from "../lib/agents-widget.ts";
 import { CARD_TONE, renderCard } from "../lib/shell-card.ts";
@@ -553,6 +554,15 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// session instead of flooding the UI. Reset on every `session_start`.
 	let notifiedRpcActivityErrors: Set<string> | undefined;
 	const overlays = new Set<AgentsView>();
+	const jobsOverlays = new Set<JobsView>();
+	let jobsOverlayOpen = false;
+	let jobsUiGeneration = 0;
+	const closeJobsOverlays = () => {
+		jobsUiGeneration++;
+		for (const view of jobsOverlays) { view.handleInput("q"); view.dispose(); }
+		jobsOverlays.clear();
+		jobsOverlayOpen = false;
+	};
 	const startPresence = (manager: ExtensionContext["sessionManager"]) => {
 		scopeCache.clear();
 		const sessionId = manager.getSessionId() ?? "";
@@ -779,7 +789,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		cancelClock = undefined;
 		if (!sessions) return;
 		const tasks = visibleTasks();
-		if (tasks.some((task) => !isFinished(task.status))) {
+		if (tasks.some((task) => !isFinished(task.status)) || runningJobs().length > 0) {
 			cancelClock = deps.schedule(() => {
 				requestRender();
 				tickClock();
@@ -826,6 +836,8 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		}),
 		onSettled: (job) => settleJob(job),
 	});
+	const runningJobs = () => jobs.list(activeSessionId() ?? "").filter(job => job.status === "running")
+		.sort((a, b) => b.startedAt - a.startedAt);
 	const monitors = createMonitorController({
 		registry: jobs,
 		schedule: (fn, ms) => deps.schedule(fn, ms),
@@ -1182,8 +1194,8 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	// Structured descriptions feed Status; native hosts keep the compact count.
 	const refreshJobStatus = () => {
 		const sessionId = activeSessionId();
-		const running = jobs.list(sessionId ?? "").filter((job) => job.status === "running")
-			.sort((a, b) => b.startedAt - a.startedAt);
+		const running = runningJobs();
+		tickClock();
 		try { parentCtx?.ui.setStatus(JOBS_STATUS_KEY, running.length === 0 ? undefined : `${JOB_GLYPH} ${running.length} job${running.length === 1 ? "" : "s"}`); } catch { /* Status is cosmetic. */ }
 		if (sessionId) {
 			try { pi.events.emit(JOBS_SIDEBAR_EVENT, { sessionId, snapshot: { jobs: running.map(({ id, label, startedAt }) => ({ id, label, startedAt })) } }); } catch { /* Display only. */ }
@@ -1586,7 +1598,14 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		tickClock();
 	});
 
+	const compactRows = (rows: number | undefined) => {
+		const budget = widgetRows(rows);
+		return agentsVisible && visibleTasks().length > 0 && runningJobs().length > 0 ? Math.max(3, Math.floor(budget / 2)) : budget;
+	};
 	const showWidget = (ctx: ExtensionContext) => {
+		closeJobsOverlays();
+		const generation = jobsUiGeneration;
+		const current = () => generation === jobsUiGeneration;
 		ui = ctx.hasUI ? ctx.ui : undefined;
 		sessions = ctx.sessionManager;
 		agentsVisible = resolveVisualSettings({ gentlePiConfigHome: visualHome }).settings.visibility.agents;
@@ -1607,7 +1626,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			let cardRows = 0;
 			return new NativePointerRegion({
 				render(width: number) {
-					const lines = agentsVisible ? renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: widgetRows(tui.terminal?.rows), viewKey }) : [];
+					const lines = agentsVisible ? renderAgentsCard(visibleTasks(), theme, width, deps.now(), { collapsed, collapseKey, maxRows: compactRows(tui.terminal?.rows), viewKey }) : [];
 					cardRows = lines.length;
 					return lines.length === 0 ? [] : [...lines, ""];
 				},
@@ -1620,6 +1639,26 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 							ctx.ui.notify(`Could not open the agents panel: ${error instanceof Error ? error.message : String(error)}`, "warning");
 						});
 					}
+					return { handled: true, render: true };
+				},
+			});
+		});
+		ui?.setWidget(JOBS_STATUS_KEY, (tui, theme) => {
+			host = tui;
+			let cardRows = 0;
+			return new NativePointerRegion({
+				render(width: number) {
+					const lines = current() ? renderJobsCard(runningJobs(), theme, width, deps.now(), compactRows(tui.terminal?.rows)) : [];
+					cardRows = lines.length;
+					return lines.length === 0 ? [] : [...lines, ""];
+				},
+				invalidate() { cardRows = 0; },
+			}, {
+				onClick(event) {
+					if (event.button !== "left" || !current() || event.y >= cardRows || runningJobs().length === 0) return undefined;
+					void openJobsOverlay(ctx).catch(error => {
+						ctx.ui.notify(`Could not open the jobs panel: ${error instanceof Error ? error.message : String(error)}`, "warning");
+					});
 					return { handled: true, render: true };
 				},
 			});
@@ -2303,25 +2342,30 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		});
 	}
 
-	pi.registerCommand(JOBS_COMMAND_NAME, {
-		description: "Show background jobs: running first, newest first within each group; status, command, output tail; s stops the selected job.",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) return;
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("The jobs overlay requires TUI mode.", "warning");
-				return;
-			}
-			let view: JobsView | undefined;
+	const openJobsOverlay = async (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		if (ctx.mode !== "tui") {
+			ctx.ui.notify("The jobs overlay requires TUI mode.", "warning");
+			return;
+		}
+		if (jobsOverlayOpen) return;
+		jobsOverlayOpen = true;
+		const generation = jobsUiGeneration;
+		const sessionId = ctx.sessionManager.getSessionId() ?? "";
+		const current = () => generation === jobsUiGeneration;
+		let view: JobsView | undefined;
+		try {
 			await ctx.ui.custom<null>((tui, theme, _keybindings, done) => {
 				const close = withOverlayRepaint(tui, done);
 				view = new JobsView({
 					theme,
 					rows: () => Math.max(0, tui.terminal.rows),
-					jobs: () => jobs.list(ctx.sessionManager.getSessionId() ?? ""),
+					jobs: () => current() ? jobs.list(sessionId) : [],
 					now: () => deps.now(),
 					// The agent was promised a notice, so a human stop is reported;
 					// a job_stop needs none because the agent itself stopped it.
 					onStop: (job) => {
+						if (!current()) return;
 						// Lines already seen are delivered before the stop notice.
 						monitors.finish(job);
 						const stopped = jobs.stop(job.id);
@@ -2330,9 +2374,19 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					onClose: () => close(null),
 					requestRender: () => tui.requestRender(),
 				});
+				if (current()) jobsOverlays.add(view);
+				else { view.dispose(); close(null); }
 				return view;
-			}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0, anchor: "center" } }).finally(() => view?.dispose());
-		},
+			}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0, anchor: "center" } });
+		} finally {
+			view?.dispose();
+			if (view) jobsOverlays.delete(view);
+			if (current()) jobsOverlayOpen = false;
+		}
+	};
+	pi.registerCommand(JOBS_COMMAND_NAME, {
+		description: "Show background jobs: running first, newest first within each group; status, command, output tail; s stops the selected job.",
+		handler: async (_args, ctx) => openJobsOverlay(ctx),
 	});
 	pi.registerCommand(AGENTS_COMMAND_NAME, {
 		description: "Show this session's active subagents; a lists open orchestrators in this profile. Peer threads are read-only; o opens a local task's transcript in $EDITOR.",
@@ -2440,6 +2494,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		rpcActivityPublisher?.stop();
 		rpcActivityPublisher = undefined;
 		cancelClock?.();
+		closeJobsOverlays();
 		for (const view of overlays) { view.handleInput("q"); view.dispose(); }
 		overlays.clear();
 		sessions = undefined;

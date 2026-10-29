@@ -243,7 +243,7 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 		const factory = widgets.get("gentle-agents");
 		return factory ? factory(tui, plainTheme).render(72).map(stripAnsi) : undefined;
 	};
-	const widgetComponent = () => widgets.get("gentle-agents")?.(tui, plainTheme);
+	const widgetComponent = (key = "gentle-agents") => widgets.get(key)?.(tui, plainTheme);
 	return { ctx, widget, widgetComponent, dialogs, overlays, customCompletions, customOptions };
 }
 
@@ -6362,6 +6362,116 @@ function fakeJobShell() {
 // A job settles only after its log file closes, which takes real I/O turns.
 const jobIo = () => new Promise((done) => setTimeout(done, 50));
 const toolText = (result: { content: Array<{ text?: string }> }) => result.content.map((part) => part.text ?? "").join("\n");
+
+test("running Jobs card ticks, dispatches native clicks to the Jobs panel, and clears on stop", async () => {
+	const h = fakePi(), runtime = deps(), shell = fakeJobShell();
+	const timers = recordTimers(runtime.deps);
+	let now = 1000;
+	gentleAgents(h.pi, {}, { ...runtime.deps, now: () => now, jobShell: shell.shell, jobOutputDir: () => shell.dir });
+	const { ctx, widgetComponent, overlays } = fakeContext();
+	try {
+		await h.fire("session_start", ctx);
+		const card = widgetComponent("gentle-jobs")!;
+		assert.ok(card, "Jobs widget is registered");
+		assert.deepEqual(card.render(80), []);
+		assert.equal(card.handleMouse?.(mouse("click", "left", 4, 0, 80, 1)), undefined);
+		await h.tools.get("bash_background")!.execute("b", { command: "make ci", label: "CI checks" }, undefined, undefined, ctx);
+		assert.match(card.render(80).map(stripAnsi).join("\n"), /Jobs.*1 running/);
+		assert.equal(timers.pending(1000), 1, "jobs alone keep the clock alive");
+		now += 5000;
+		assert.equal(timers.run(1000), 1);
+		assert.match(card.render(80).map(stripAnsi).join("\n"), /CI checks.*5s/);
+		const root = new Container();
+		root.addChild(new Text("Chat above", 0, 0));
+		root.addChild(card);
+		const dispatch = (type: TuiMouseEvent["type"], button: TuiMouseEvent["button"], y = 1) => root.handleMouse(mouse(type, button, 4, y, 80, root.render(80).length));
+		for (const [type, button] of [["click", "right"], ["press", "left"], ["wheel", "none"]] as const) assert.equal(dispatch(type, button), undefined);
+		assert.equal(dispatch("click", "left", root.render(80).length - 1), undefined, "spacer is inert");
+		assert.equal(dispatch("click", "left")?.handled, true);
+		assert.match(overlays[0].render(80).map(stripAnsi).join("\n"), /Jobs · 1 running/);
+		dispatch("click", "left");
+		await h.commands.get("gentle:jobs")!.handler("", ctx);
+		assert.equal(overlays.length, 1, "command and clicks share one open guard");
+		overlays[0].handleInput("s");
+		assert.deepEqual(card.render(80), []);
+		assert.equal(timers.pending(1000), 0);
+		overlays[0].handleInput("q");
+	} finally { await h.fire("session_shutdown", ctx); shell.cleanup(); }
+});
+
+test("Jobs card retries failed opens and old panels cannot stop jobs after a session switch", async () => {
+	const h = fakePi(), runtime = deps(), shell = fakeJobShell();
+	const timers = recordTimers(runtime.deps);
+	gentleAgents(h.pi, {}, { ...runtime.deps, jobShell: shell.shell, jobOutputDir: () => shell.dir });
+	const { ctx, widgetComponent, overlays, dialogs } = fakeContext();
+	try {
+		await h.fire("session_start", ctx);
+		await h.tools.get("monitor")!.execute("m", { command: "tail -f app.log", timeout_seconds: 60 }, undefined, undefined, ctx);
+		const card = widgetComponent("gentle-jobs")!;
+		const click = () => { const lines = card.render(80); return card.handleMouse?.(mouse("click", "left", 4, 0, 80, lines.length)); };
+		const custom = ctx.ui.custom;
+		ctx.ui.custom = async () => { throw new Error("overlay unavailable"); };
+		click(); await tick();
+		assert.ok(dialogs.includes("notify:Could not open the jobs panel: overlay unavailable"));
+		ctx.ui.custom = custom;
+		click();
+		assert.equal(overlays.length, 1);
+		const replacement = fakeContext();
+		Object.assign(replacement.ctx.sessionManager, { getSessionId: () => "s2" });
+		await h.fire("session_start", replacement.ctx);
+		assert.deepEqual(replacement.widgetComponent("gentle-jobs")!.render(80), []);
+		assert.equal(timers.pending(1000), 0, "old session jobs do not keep the new clock alive");
+		overlays[0].handleInput("s");
+		assert.equal(shell.runs[0].signal?.aborted, false, "stale overlay controls are disabled");
+		assert.deepEqual(card.render(80), [], "old widget is inert after replacement");
+	} finally { await h.fire("session_shutdown", ctx); shell.cleanup(); }
+});
+
+test("Jobs card clears after a natural exit and monitor timeout, and shutdown closes its panel", async () => {
+	const h = fakePi(), runtime = deps(), shell = fakeJobShell();
+	const timers = recordTimers(runtime.deps);
+	gentleAgents(h.pi, {}, { ...runtime.deps, jobShell: shell.shell, jobOutputDir: () => shell.dir });
+	const { ctx, widgetComponent, overlays, customCompletions } = fakeContext();
+	try {
+		await h.fire("session_start", ctx);
+		const card = widgetComponent("gentle-jobs")!;
+		await h.tools.get("bash_background")!.execute("b", { command: "make ci" }, undefined, undefined, ctx);
+		shell.runs[0].exit(0);
+		await eventually(() => h.sent.some(entry => entry.message.customType === "gentle-jobs.notice"), "exit notice must follow log closure");
+		assert.deepEqual(card.render(80), []);
+		assert.equal(timers.pending(1000), 0);
+		await h.tools.get("monitor")!.execute("m", { command: "tail -f app.log", timeout_seconds: 60 }, undefined, undefined, ctx);
+		assert.match(card.render(80).map(stripAnsi).join("\n"), /tail -f app.log/);
+		assert.equal(timers.run(60_000), 1);
+		assert.deepEqual(card.render(80), []);
+		assert.equal(timers.pending(1000), 0);
+		await h.tools.get("bash_background")!.execute("b2", { command: "make build" }, undefined, undefined, ctx);
+		const opened = h.commands.get("gentle:jobs")!.handler("", ctx);
+		await h.fire("session_shutdown", ctx);
+		await opened;
+		assert.deepEqual(customCompletions, [null]);
+		assert.deepEqual(card.render(80), []);
+		overlays[0].handleInput("s");
+		assert.equal(timers.pending(1000), 0);
+	} finally { await h.fire("session_shutdown", ctx); shell.cleanup(); }
+});
+
+test("Agents and Jobs cards share a compact height budget on a short terminal", async () => {
+	const h = fakePi(), runtime = deps(), shell = fakeJobShell();
+	gentleAgents(h.pi, {}, { ...runtime.deps, jobShell: shell.shell, jobOutputDir: () => shell.dir });
+	const { ctx, widgetComponent } = fakeContext({ terminal: { rows: 24 }, requestRender() {} } as typeof fakeTui);
+	try {
+		await h.fire("session_start", ctx);
+		for (let i = 0; i < 5; i++) {
+			await h.tools.get("bash_background")!.execute(`b${i}`, { command: `make build-${i}` }, undefined, undefined, ctx);
+			await h.tools.get("subagent_run")!.execute(`a${i}`, { agent: "explore", task: `Explore ${i}`, mode: "background" }, undefined, undefined, ctx);
+		}
+		const agents = widgetComponent()!.render(80), jobs = widgetComponent("gentle-jobs")!.render(80);
+		assert.match(agents.map(stripAnsi).join("\n"), /more/);
+		assert.match(jobs.map(stripAnsi).join("\n"), /more/);
+		assert.ok(agents.length + jobs.length <= 12, "both cards leave at least half the short terminal for chat/editor");
+	} finally { await h.fire("session_shutdown", ctx); shell.cleanup(); }
+});
 
 test("standalone bash sleep is blocked only while background work is active (#1903)", async () => {
 	const { pi, tools, fire, sent } = fakePi();
