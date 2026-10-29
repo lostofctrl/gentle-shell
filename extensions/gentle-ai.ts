@@ -1809,7 +1809,7 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
 	/(^|\/)\.aws\/credentials$/,
 	/(^|\/)\.config\/gh\/hosts\.ya?ml$/,
 	/(^|\/)secrets(?:\/|$)/,
-	/(^|\/)\.env(?:$|[./_-])/,
+	/(^|\/)\.env(?!\.example$)(?:$|[./_-])/,
 	/\.(?:pem|key|p12|pfx)$/,
 ];
 

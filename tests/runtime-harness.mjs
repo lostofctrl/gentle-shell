@@ -776,6 +776,22 @@ async function run() {
 			undefined,
 			"non-writer subagents must remain unaffected",
 		);
+		for (const toolName of ["read", "write", "edit"]) {
+			for (const path of [".env.example", join(toolCwd, "project", ".env.example")]) {
+				assert.equal(
+					await toolHook({ toolName, input: { path } }, createCtx(toolCwd)),
+					undefined,
+					`${toolName} must allow ${path}`,
+				);
+			}
+			for (const path of [".env", ".env.local", ".env.example.local", ".env.examples", ".env.example/child", ".ssh/.env.example", "secrets/.env.example", ".env.local/.env.example"]) {
+				assert.equal(
+					(await toolHook({ toolName, input: { path } }, createCtx(toolCwd)))?.block,
+					true,
+					`${toolName} must block ${path}`,
+				);
+			}
+		}
 		const sensitiveRead = await toolHook({ toolName: "read", input: { path: join(toolCwd, ".env.local") } }, createCtx(toolCwd));
 		assert.equal(sensitiveRead.block, true);
 		assert.match(sensitiveRead.reason, /sensitive path/);
