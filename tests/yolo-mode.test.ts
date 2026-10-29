@@ -78,7 +78,7 @@ test("human command enable/disable/status/invalid and status/widget clearing", a
 	await h.command("status"); assert.match(h.notices.at(-1)!, /OFF/);
 	await h.command("enable");
 	assert.equal(h.statuses.get("gentle:yolo"), YOLO_STATUS_ICON);
-	assert.deepEqual(h.widgets.get("gentle:yolo"), [YOLO_STATUS_ICON]);
+	assert.equal(h.widgets.get("gentle:yolo"), undefined);
 	for (const invalid of ["invalid", "on", "off", "toggle"]) {
 		await h.command(invalid);
 		assert.equal(h.notices.at(-1), USAGE);

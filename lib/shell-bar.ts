@@ -52,6 +52,7 @@ export interface ShellHeaderModel {
 	effort: string | undefined;
 	profile?: string;
 	contextPercent: number | null;
+	contextWindow: number;
 	costTotal: number;
 	subscription: boolean;
 	// The active provider's subscription usage, shown as its own segment after
@@ -61,8 +62,8 @@ export interface ShellHeaderModel {
 }
 
 export function buildShellHeaderModel(model: ShellBarModel, showJobs = false): ShellHeaderModel {
-	const { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage } = model;
-	return { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, costTotal, subscription, usage,
+	const { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, contextWindow, costTotal, subscription, usage } = model;
+	return { sessionName, latestPrompt, cwd, branch, dirty, modelId, effort, profile, contextPercent, contextWindow, costTotal, subscription, usage,
 		...(showJobs && model.jobs?.length ? { jobs: model.jobs.length } : {}) };
 }
 
@@ -162,22 +163,28 @@ function executionSegment(modelId: string, effort: string | undefined, theme: Sh
 		: theme.fg(ROLE.MODEL, modelId);
 }
 
-function contextSegment(contextPercent: number | null, theme: ShellBarTheme, paint?: GaugePaint): string {
+function contextSegment(contextPercent: number | null, contextWindow: number, theme: ShellBarTheme): string {
 	const percentText = contextPercent === null ? "?%" : `${Math.round(contextPercent)}%`;
-	return `${theme.fg(ROLE.LABEL, "ctx")} ${paintGauge(contextPercent, theme, GAUGE_CELLS, paint)} ${theme.fg(ROLE.VALUE, percentText)}`;
+	const capacity = contextWindow > 0 ? formatTokens(contextWindow).replace(/\.0M$/, "M") : "?";
+	const tone = contextPercent === null ? "dim" : contextPercent >= 80 ? "error" : contextPercent >= 50 ? "warning" : "accent";
+	return `${theme.fg(ROLE.LABEL, "ctx")} ${theme.fg(ROLE.VALUE, capacity)} ${theme.fg(tone, percentText)}`;
 }
 
 function costSegment(costTotal: number, subscription: boolean, theme: ShellBarTheme): string {
 	return theme.fg(ROLE.VALUE, formatCost(costTotal, subscription));
 }
 
+function footerStatuses(model: ShellBarModel, presentation?: Presentation): string[] {
+	return model.statuses.filter((status) => !presentation?.promptOwnsChrome || stripAnsi(status) !== "🚀");
+}
+
 function buildSegments(model: ShellBarModel, theme: ShellBarTheme, presentation?: Presentation, paint?: GaugePaint): string[] {
 	const location = locationSegment(model, theme);
 	const modelSegment = executionSegment(model.modelId, model.effort, theme);
-	const context = contextSegment(model.contextPercent, theme, paint);
+	const context = contextSegment(model.contextPercent, model.contextWindow, theme);
 	const cost = costSegment(model.costTotal, model.subscription, theme);
 	const usage = model.usage ? renderUsageBar(model.usage, theme, model.modelId, paint) : undefined;
-	const statuses = model.statuses.map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
+	const statuses = footerStatuses(model, presentation).map((status) => theme.fg(ROLE.STATUS, sanitizeStatus(status)));
 	return [
 		...(presentation?.density === "minimal" ? [] : [theme.fg(ROLE.BRAND, SHELL_BAR_BRAND)]),
 		...(presentation?.promptOwnsChrome ? [] : [
@@ -348,15 +355,17 @@ export function renderComposerMetrics(model: ShellBarModel, theme: ShellBarTheme
 	width = Math.max(0, Math.floor(width));
 	// Local plan-mode.ts publishes this label only while read-only planning is active.
 	const planning = model.statuses.some((status) => stripAnsi(status) === "⏸ plan");
+	const yolo = model.statuses.some((status) => stripAnsi(status) === "🚀");
 	const windows = model.usage ? (selectUsageLimit(model.usage, model.modelId)?.windows ?? []) : [];
 	for (const stage of [0, 1, 2, 3]) {
 		const usage = presentation?.visibility.usageCost === false || stage === 3 ? undefined
 			: usageSegmentText(windows, theme, stage === 0 ? "full" : stage === 1 ? "text" : "primary", usageHint, paint);
 		const parts = [
+			...(yolo ? [theme.fg("warning", "🚀")] : []),
 			...(planning ? [theme.fg("warning", "📋")] : []),
 			...(presentation?.visibility.modelDetails === false ? [] : [executionSegment(model.modelId, stage === 0 ? model.effort : undefined, theme)]),
 			...(presentation?.visibility.usageCost === false ? [] : [
-				stage === 0 ? contextSegment(model.contextPercent, theme, paint) : theme.fg(ROLE.VALUE, `ctx ${model.contextPercent === null ? "?" : Math.round(model.contextPercent)}%`),
+				contextSegment(model.contextPercent, model.contextWindow, theme),
 				...(stage < 2 ? [costSegment(model.costTotal, model.subscription, theme)] : []),
 			]),
 		];
@@ -428,7 +437,7 @@ function headerContent(model: ShellHeaderModel, theme: ShellBarTheme, width: num
 	const jobs = model.jobs ? theme.fg(ROLE.STATUS, shellJobsCount(model.jobs)) : undefined;
 	const ctxCost = joinSegments([
 		...(jobs ? [jobs] : []),
-		...(presentation?.promptOwnsChrome || presentation?.visibility.usageCost === false ? [] : [contextSegment(model.contextPercent, theme, paint), costSegment(model.costTotal, model.subscription, theme)]),
+		...(presentation?.promptOwnsChrome || presentation?.visibility.usageCost === false ? [] : [contextSegment(model.contextPercent, model.contextWindow, theme), costSegment(model.costTotal, model.subscription, theme)]),
 	], theme);
 	const windows = model.usage ? (selectUsageLimit(model.usage, model.modelId)?.windows ?? []) : [];
 	const leftStages = headerLeftStages(model, theme, presentation?.visibility.modelDetails !== false, presentation?.promptOwnsChrome)
@@ -492,7 +501,7 @@ export function renderShellBelowInputFloat(model: ShellBarModel, theme: ShellBar
 		: undefined;
 	const statuses = presentation.statusPlacement === "hidden" ? [] : [
 		...(model.jobs?.length ? [shellJobsCount(model.jobs.length)] : []),
-		...model.statuses.map(sanitizeStatus).filter(Boolean),
+		...footerStatuses(model, presentation).map(sanitizeStatus).filter(Boolean),
 	];
 	const statusRow = statuses.length
 		? floatHeaderRow(theme, targetWidth, () => joinSegments(statuses.map((status) => theme.fg(ROLE.STATUS, status)), theme))
@@ -522,7 +531,7 @@ export function renderShellBottomOnlyBar(model: ShellBarModel, theme: ShellBarTh
 	const headerModel = buildShellHeaderModel(model, true);
 	// Neon, missing backgrounds and sub-minimum widths keep the old row count.
 	const rows = [headerContent(headerModel, theme, width, usageHint, presentation, paint).text];
-	const statuses = model.statuses.map(sanitizeStatus).filter((status) => status.length > 0).map((status) => theme.fg(ROLE.STATUS, status));
+	const statuses = footerStatuses(model, presentation).map(sanitizeStatus).filter((status) => status.length > 0).map((status) => theme.fg(ROLE.STATUS, status));
 	return statuses.length ? [...rows, truncateToWidth(joinSegments(statuses, theme), Math.max(0, Math.floor(width)), "…")] : rows;
 }
 

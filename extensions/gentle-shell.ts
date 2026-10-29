@@ -1,6 +1,8 @@
 import { CustomEditor, keyHint, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { isHomeOrBroadUserDirectory } from "../lib/bounded-writer-admission.ts";
-import { Editor, decodeKittyPrintable, isKeyRelease, matchesKey, parseKey, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { Editor, CURSOR_MARKER, renderFakeCursor, sliceByColumn, decodeKittyPrintable, isKeyRelease, matchesKey, parseKey, truncateToWidth, visibleWidth, type AutocompleteProvider, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { ShellAutocompleteProvider, ShellHistory } from "../lib/shell-autocomplete.ts";
+import { InlineSlashAutocompleteProvider, installInlineSlashTriggers } from "../lib/inline-slash-autocomplete.ts";
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
@@ -381,6 +383,7 @@ export function createShellBarComponent(
 }
 
 interface PromptEditorDeps {
+	cwd?: () => string;
 	fg: (color: string, text: string) => string;
 	bg?: (color: string, text: string) => string;
 	bold: (text: string) => string;
@@ -441,6 +444,32 @@ export function extractQueuedText(combined: string, draft: string): string | und
 }
 
 export class GentlePromptEditor extends CustomEditor {
+	private readonly shellHistory = new ShellHistory();
+	private shellCompletionsPending = 0;
+	private renderedShellGhost?: { text: string; suffix: string };
+	private readonly inlineSlashEnabled: boolean;
+
+	override setAutocompleteProvider(provider: AutocompleteProvider): void {
+		if (this.inlineSlashEnabled) provider = new InlineSlashAutocompleteProvider(provider);
+		super.setAutocompleteProvider(new ShellAutocompleteProvider(provider, () => this.deps.cwd?.() ?? process.cwd(), active => {
+			this.shellCompletionsPending += active ? 1 : -1;
+			this.deps.requestRender();
+		}));
+	}
+
+	override addToHistory(text: string): void {
+		super.addToHistory(text);
+		this.shellHistory.add(text);
+	}
+
+	private shellGhost(): string {
+		const lines = this.getLines(), cursor = this.getCursor();
+		if (!this.focused || lines.length !== 1 || cursor.line !== 0 || cursor.col !== lines[0]!.length ||
+			this.isShowingAutocomplete() || this.shellCompletionsPending || this.vimNormal ||
+			this.selectionEngine.selectionLength()) return "";
+		return this.shellHistory.suffix(this.getText());
+	}
+
 	private promptState: PromptState = PROMPT_STATE.IDLE;
 	private tick = 0;
 	private animationPolicy: AnimationPolicy = "quality";
@@ -483,6 +512,7 @@ export class GentlePromptEditor extends CustomEditor {
 		this.selectionEngine = new SelectionEngine(this);
 		this.deps = deps;
 		this.keybindingsManager = keybindings;
+		this.inlineSlashEnabled = installInlineSlashTriggers(this);
 	}
 
 	setAnimationPolicy(policy: AnimationPolicy): void {
@@ -993,6 +1023,16 @@ export class GentlePromptEditor extends CustomEditor {
 				return;
 			}
 		}
+		const ghost = this.renderedShellGhost;
+		if (matchesKey(data, "right") && ghost?.text === this.getText() && this.shellGhost() === ghost.suffix &&
+			![...this.actionHandlers.keys()].some(action => this.keybindingsManager.matches(data, action)) &&
+			!this.keybindingsManager.matches(data, "app.clipboard.pasteImage")) {
+			if (this.onExtensionShortcut?.(data) === true) return;
+			this.insertTextAtCursor(ghost.suffix);
+			this.renderedShellGhost = undefined;
+			this.deps.requestRender();
+			return;
+		}
 		super.handleInput(data);
 	}
 
@@ -1087,6 +1127,22 @@ export class GentlePromptEditor extends CustomEditor {
 		this.floatMouseLayout = layout.background ? layout : undefined;
 		const inner = layout.nativeWidth;
 		const lines = super.render(inner);
+		this.renderedShellGhost = undefined;
+		const suffix = this.shellGhost();
+		if (suffix) {
+			const row = lines.findIndex(line => line.includes(CURSOR_MARKER));
+			if (row >= 0) {
+				const before = lines[row]!.split(CURSOR_MARKER)[0]!;
+				const col = visibleWidth(before);
+				const shown = truncateToWidth(suffix, Math.max(0, inner - col), "");
+				if (shown) {
+					const first = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)][0]!.segment;
+					lines[row] = before + CURSOR_MARKER + renderFakeCursor(this.deps.fg("dim", first)) +
+						this.deps.fg("dim", shown.slice(first.length)) + sliceByColumn(lines[row]!, col + visibleWidth(shown));
+					this.renderedShellGhost = { text: this.getText(), suffix };
+				}
+			}
+		}
 		if (this.getText() === "" && lines.length === 3) lines[1] = withPromptHint(lines[1], PROMPT_HINT, this.deps.fg);
 		const state = this.promptState === PROMPT_STATE.WORKING && this.deps.pending() ? PROMPT_STATE.QUEUED : this.promptState;
 		// Neon keeps the shell's border role; float follows Pi's live public
@@ -1193,6 +1249,7 @@ function installPrompt(
 	if (previous && !previous[PROMPT_OWNER]) return false;
 	const factory: PromptFactory = (tui, theme, keybindings) => {
 		const prompt = new GentlePromptEditor(tui, theme, keybindings, {
+			cwd: () => ctx.cwd,
 			fg: (color, text) => ctx.ui.theme.fg(color as Parameters<typeof ctx.ui.theme.fg>[0], text),
 			bg: (color, text) => ctx.ui.theme.bg(color as Parameters<typeof ctx.ui.theme.bg>[0], text),
 			bold: (text) => ctx.ui.theme.bold(text),

@@ -9,6 +9,7 @@ import {
 	gaugeTone,
 	renderGauge,
 	renderShellBar,
+	renderComposerMetrics,
 	renderShellBottomOnlyBar,
 	renderShellBelowInputFloat,
 	renderShellHeaderBar,
@@ -215,23 +216,34 @@ test("renderShellBar renders one line with the segments in order", () => {
 	assert.equal(rest.length, 0);
 	assert.equal(
 		line,
-		"✿ gentle shell ⟡ ~/work/gentle-pi ⎇ main ⟡ gpt-5.5 · medium ⟡ ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub",
+		"✿ gentle shell ⟡ ~/work/gentle-pi ⎇ main ⟡ gpt-5.5 · medium ⟡ ctx 272k 45% ⟡ $9.49 sub",
 	);
 });
 
-test("renderShellBar paints the context gauge with the given gauge roles", () => {
-	const [line] = renderShellBar(model(), taggedTheme, 400, undefined, { ok: "gaugeOk", empty: "gaugeEmpty" });
-	assert.match(line, /<gaugeOk>▰▰▰▰<\/gaugeOk><gaugeEmpty>▱▱▱▱<\/gaugeEmpty>/);
-	const [fallback] = renderShellBar(model(), taggedTheme, 400);
-	assert.match(fallback, /<accent>▰▰▰▰<\/accent><border>▱▱▱▱<\/border>/);
+test("context capacity replaces the gauge and percentage uses utilization colors", () => {
+	for (const [percent, tone] of [[0, "accent"], [49.9, "accent"], [50, "warning"], [79.9, "warning"], [80, "error"], [100, "error"], [null, "dim"]] as const) {
+		for (const [contextWindow, capacity] of [[200_000, "200k"], [1_000_000, "1M"], [1_500_000, "1.5M"]] as const) {
+			const data = model({ contextPercent: percent, contextWindow });
+			for (const line of [renderShellBar(data, taggedTheme, 400)[0], renderShellHeaderBar(buildShellHeaderModel(data), taggedTheme, 400).text, renderComposerMetrics(data, taggedTheme, 400).text]) {
+				assert.ok(line.includes(`<text>${capacity}</text>`));
+				assert.ok(line.includes(`<${tone}>${percent === null ? "?" : Math.round(percent)}%</${tone}>`));
+				assert.doesNotMatch(line, /[▰▱]/);
+			}
+		}
+	}
+	for (const width of [20, 30, 40, 60, 100, 160]) {
+		const { text } = renderComposerMetrics(model({ contextPercent: 95, contextWindow: 1_000_000 }), plainTheme, width);
+		assert.ok(visibleWidth(text) <= width);
+		if (text.includes("95%")) assert.match(text, /ctx 1M 95%/);
+	}
 });
 
-test("renderShellBar colors the brand, model, effort, and gauge by role", () => {
+test("renderShellBar colors the brand, model, effort, and context by role", () => {
 	const [line] = renderShellBar(model(), taggedTheme, 400);
 	assert.match(line, /<accent>✿ gentle shell<\/accent>/);
 	assert.match(line, /<text>gpt-5\.5<\/text>/);
 	assert.match(line, /<syntaxFunction>medium<\/syntaxFunction>/);
-	assert.match(line, /<accent>▰▰▰▰<\/accent><border>▱▱▱▱<\/border>/);
+	assert.match(line, /<text>272k<\/text> <accent>45%<\/accent>/);
 	assert.match(line, /<dim>⟡<\/dim>/);
 });
 
@@ -293,7 +305,7 @@ test("renderShellBar keeps its own zero-window contract independent of the sideb
 
 test("renderShellBar shows an unknown context as a question mark after compaction", () => {
 	const [line] = renderShellBar(model({ contextPercent: null }), plainTheme, 160);
-	assert.match(line, /ctx ▱▱▱▱▱▱▱▱ \?%/);
+	assert.match(line, /ctx 272k \?%/);
 });
 
 test("renderShellBar right-aligns the session name when it fits", () => {
@@ -412,7 +424,7 @@ test("sidebar Status card drops Model, Effort, Context, Cost and Usage, keeping 
 
 // The live header row above the fullscreen rail: identity on the left (brand,
 // location, model · effort · profile), the per-frame counters right-aligned
-// (context gauge, cost). Never the working/thinking state or extension
+// (context capacity and percentage, cost). Never the working/thinking state or extension
 // statuses — those stay in the prompt and the Status card.
 
 test("buildShellHeaderModel keeps only the header's fields from the bar model", () => {
@@ -427,6 +439,7 @@ test("buildShellHeaderModel keeps only the header's fields from the bar model", 
 		effort: "medium",
 		profile: "team",
 		contextPercent: 45,
+		contextWindow: 272_000,
 		costTotal: 9.49,
 		subscription: true,
 		usage: undefined,
@@ -439,7 +452,7 @@ test("renderShellHeaderBar shows the session name in the left identity group", (
 	const { text } = renderShellHeaderBar(header, plainTheme, 140);
 	assert.match(text, /^✿ ⟡ Release notes ⟡/);
 	assert.match(text, /gpt-5\.5 · medium/);
-	assert.match(text, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
+	assert.match(text, /ctx 272k 45% ⟡ \$9\.49 sub ⟡ usage$/);
 	assert.equal(visibleWidth(text), 140);
 });
 
@@ -449,7 +462,7 @@ test("header keeps a meaningful long session name with brand, model and counters
 		const { text } = renderShellHeaderBar(header, plainTheme, width);
 		assert.match(text, /^✿ ⟡ Release [^⟡]*… ⟡/);
 		assert.match(text, /gpt-5\.5/);
-		assert.match(text, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/);
+		assert.match(text, /ctx 272k 45% ⟡ \$9\.49 sub/);
 		assert.equal(visibleWidth(text), width);
 		assert.equal(text.split("\n").length, 1);
 	}
@@ -513,7 +526,7 @@ test("renderShellHeaderBar draws the brand, identity, and right-aligned counters
 	const header = buildShellHeaderModel(model({ profile: "team" }));
 	const { text: line } = renderShellHeaderBar(header, plainTheme, 120);
 	const left = "✿ ⟡ ~/work/gentle-pi ⎇ main ⟡ gpt-5.5 · medium · team";
-	const right = "ctx ▰▰▰▰▱▱▱▱ 45% ⟡ $9.49 sub ⟡ usage";
+	const right = "ctx 272k 45% ⟡ $9.49 sub ⟡ usage";
 	assert.equal(line, left + " ".repeat(120 - visibleWidth(left) - visibleWidth(right)) + right);
 	assert.equal(visibleWidth(line), 120);
 });
@@ -537,38 +550,38 @@ test("renderShellHeaderBar drops the profile, then the effort, then the whole lo
 	const { text: wide } = renderShellHeaderBar(withProfile, plainTheme, 120);
 	assert.match(wide, /gpt-5\.5 · medium · team/);
 	assert.match(wide, /~\/work\/gentle-pi ⎇ main/);
-	assert.match(wide, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
+	assert.match(wide, /ctx 272k 45% ⟡ \$9\.49 sub ⟡ usage$/);
 
-	// 90 cols: the profile no longer fits, but effort and location still do.
-	const { text: noProfile } = renderShellHeaderBar(withProfile, plainTheme, 90);
+	// 86 cols: the profile no longer fits, but effort and location still do.
+	const { text: noProfile } = renderShellHeaderBar(withProfile, plainTheme, 86);
 	assert.doesNotMatch(noProfile, /team/);
 	assert.match(noProfile, /gpt-5\.5 · medium/);
 	assert.match(noProfile, /~\/work\/gentle-pi ⎇ main/);
-	assert.equal(visibleWidth(noProfile), 90);
+	assert.equal(visibleWidth(noProfile), 86);
 
-	// 80 cols: effort goes too, only the bare model id remains next to location.
-	const { text: noEffort } = renderShellHeaderBar(withProfile, plainTheme, 80);
+	// 76 cols: effort goes too, only the bare model id remains next to location.
+	const { text: noEffort } = renderShellHeaderBar(withProfile, plainTheme, 76);
 	assert.doesNotMatch(noEffort, /medium/);
 	assert.doesNotMatch(noEffort, /team/);
 	assert.match(noEffort, /gpt-5\.5/);
 	assert.match(noEffort, /~\/work\/gentle-pi ⎇ main/);
-	assert.equal(visibleWidth(noEffort), 80);
+	assert.equal(visibleWidth(noEffort), 76);
 
-	// 70 cols: the whole location segment goes; brand and model survive with the counters.
-	const { text: noLocation } = renderShellHeaderBar(withProfile, plainTheme, 70);
+	// 66 cols: the whole location segment goes; brand and model survive with the counters.
+	const { text: noLocation } = renderShellHeaderBar(withProfile, plainTheme, 66);
 	assert.doesNotMatch(noLocation, /~\/work\/gentle-pi/);
 	assert.match(noLocation, /gpt-5\.5/);
 	assert.match(noLocation, /✿/);
-	assert.match(noLocation, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub ⟡ usage$/);
-	assert.equal(visibleWidth(noLocation), 70);
+	assert.match(noLocation, /ctx 272k 45% ⟡ \$9\.49 sub ⟡ usage$/);
+	assert.equal(visibleWidth(noLocation), 66);
 
-	// 40 cols: even the standing usage segment is gone now; brand, ctx and cost survive.
-	const { text: noUsage } = renderShellHeaderBar(withProfile, plainTheme, 40);
+	// 36 cols: even the standing usage segment is gone now; brand, ctx and cost survive.
+	const { text: noUsage } = renderShellHeaderBar(withProfile, plainTheme, 36);
 	assert.doesNotMatch(noUsage, /~\/work\/gentle-pi/);
 	assert.doesNotMatch(noUsage, /usage/);
 	assert.match(noUsage, /✿/);
-	assert.match(noUsage, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/);
-	assert.equal(visibleWidth(noUsage), 40);
+	assert.match(noUsage, /ctx 272k 45% ⟡ \$9\.49 sub$/);
+	assert.equal(visibleWidth(noUsage), 36);
 });
 
 test("renderShellHeaderBar returns an empty string only once the brand itself cannot fit", () => {
@@ -612,26 +625,26 @@ test("renderShellHeaderBar degrades the usage segment (gauges, then secondary wi
 	const full = renderShellHeaderBar(header, plainTheme, 140, "alt+u").text;
 	assert.match(full, /5h ▰▰▱▱▱▱▱▱ 26% · week ▰▱▱▱▱▱▱▱ 12%/);
 
-	// 100 cols: the gauges no longer fit, but both windows still show as text
+	// 86 cols: the gauges no longer fit, but both windows still show as text
 	// (a positive match on the bare "5h 26% · week 12%" run rules out any
-	// gauge glyph sneaking in between them; ctx's own gauge is unrelated).
-	const noGauges = renderShellHeaderBar(header, plainTheme, 90, "alt+u").text;
+	// gauge glyph sneaking in between them).
+	const noGauges = renderShellHeaderBar(header, plainTheme, 86, "alt+u").text;
 	assert.match(noGauges, /usage 5h 26% · week 12% · alt\+u$/);
-	assert.match(noGauges, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/, "ctx/cost are untouched while usage still degrades");
-	assert.equal(visibleWidth(noGauges), 90);
+	assert.match(noGauges, /ctx 272k 45% ⟡ \$9\.49 sub/, "ctx/cost are untouched while usage still degrades");
+	assert.equal(visibleWidth(noGauges), 86);
 
-	// 80 cols: only the first window remains.
-	const primaryOnly = renderShellHeaderBar(header, plainTheme, 70, "alt+u").text;
+	// 66 cols: only the first window remains.
+	const primaryOnly = renderShellHeaderBar(header, plainTheme, 66, "alt+u").text;
 	assert.match(primaryOnly, /usage 5h 26% · alt\+u$/);
 	assert.doesNotMatch(primaryOnly, /week/);
-	assert.match(primaryOnly, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub/);
-	assert.equal(visibleWidth(primaryOnly), 70);
+	assert.match(primaryOnly, /ctx 272k 45% ⟡ \$9\.49 sub/);
+	assert.equal(visibleWidth(primaryOnly), 66);
 
-	// 60 cols: the whole usage segment is gone, ctx/cost remain intact.
-	const noUsage = renderShellHeaderBar(header, plainTheme, 60, "alt+u").text;
+	// 56 cols: the whole usage segment is gone, ctx/cost remain intact.
+	const noUsage = renderShellHeaderBar(header, plainTheme, 56, "alt+u").text;
 	assert.doesNotMatch(noUsage, /usage/);
-	assert.match(noUsage, /ctx ▰▰▰▰▱▱▱▱ 45% ⟡ \$9\.49 sub$/);
-	assert.equal(visibleWidth(noUsage), 60);
+	assert.match(noUsage, /ctx 272k 45% ⟡ \$9\.49 sub$/);
+	assert.equal(visibleWidth(noUsage), 56);
 });
 
 test("renderShellHeaderBar's usage span always points at the usage text, not ctx/cost", () => {

@@ -1,4 +1,4 @@
-import { ScrollView, VStack, visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Container, Spacer, ScrollView, VStack, visibleWidth, type Component, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sidebarState, type SidebarRail } from "./shell-sidebar.ts";
 import type { ShellBarTheme } from "./shell-bar.ts";
 import { CARD_STYLE, cardStyle, type CardStyle } from "./shell-card.ts";
@@ -303,29 +303,50 @@ export function installSidebar(tui: TUI, theme: ShellBarTheme, placement: () => 
 			// it as minSize. Overriding only the node leaves the measured blank
 			// row in place, so the dock is re-hosted in a real VStack over the
 			// same children with the footer entry free to shrink to zero. One
-			// wrapper per dock keeps component identity stable across frames.
-			const docks = new WeakMap<Component, VStack>();
-			const reclaimFooterRow = (node: LayoutNode): LayoutNode => {
+			// wrapper per dock/ footer mode keeps component identity stable across frames.
+			// The same adapter removes Pi's above-editor spacer even without a rail.
+			const docks = [new WeakMap<Component, VStack>(), new WeakMap<Component, VStack>()];
+			const compactDock = (node: LayoutNode, reclaimFooter = true): LayoutNode => {
 				if (node.type !== "vstack" || !node.entries?.length) return node;
 				const entries = node.entries as Array<{ component: Component & { [NODE]?: () => LayoutNode } }>;
 				const dock = entries[entries.length - 1]!.component;
 				if (typeof dock[NODE] !== "function") return node;
-				let wrapped = docks.get(dock);
+				const cache = docks[Number(reclaimFooter)]!;
+				let wrapped = cache.get(dock);
 				if (!wrapped) {
 					const inner = dock[NODE]!();
 					if (inner.type !== "vstack" || !inner.entries?.length) return node;
-					const last = inner.entries.length - 1;
-					wrapped = new VStack(inner.entries.map((entry, index) => index === last ? { ...(entry as StackLayoutEntry), minSize: 0 } : entry as StackLayoutEntry), { gap: inner.gap, align: inner.align });
-					docks.set(dock, wrapped);
+					const children = inner.entries as StackLayoutEntry[];
+					const above = children.length === 6 && children[3]?.minSize === 3 ? children[2]?.component : undefined;
+					let widgets: Container | undefined;
+					if (above?.constructor === Container) {
+						// Pi inserts Spacer(1) even with no widgets. Re-host live children,
+						// not blank strings, so widget spacing and mouse geometry survive.
+						const source = above as Container;
+						widgets = new Container();
+						const render = widgets.render.bind(widgets);
+						widgets.render = (width) => {
+							const first = source.children[0];
+							widgets!.children = first?.constructor === Spacer && first.render(width).length === 1
+								? source.children.slice(1) : source.children;
+							return render(width);
+						};
+						widgets.invalidate = () => source.invalidate();
+					}
+					const last = children.length - 1;
+					wrapped = new VStack(children.map((entry, index) => {
+						if (index === 2 && widgets) return { ...entry, component: widgets };
+						return index === last && reclaimFooter ? { ...entry, minSize: 0 } : entry;
+					}), { gap: inner.gap, align: inner.align });
+					cache.set(dock, wrapped);
 				}
 				return { ...node, entries: entries.map((entry, index) => index === entries.length - 1 ? { ...entry, component: wrapped! } : entry) };
 			};
-			// Without a rail the native layout stays in place; a hidden Status, or a
-			// narrow top header owning it, only frees the footer's reserved dock row,
-			// exactly as the rail does.
-			const nativeLayout = () => placement() === "hidden" || headerOwnsStatus() ? reclaimFooterRow(original.call(root)) : original.call(root);
+			// Without a rail, compact only the above-editor spacing unless a hidden
+			// Status or narrow top header also owns the footer's reserved dock row.
+			const nativeLayout = () => compactDock(original.call(root), placement() === "hidden" || headerOwnsStatus());
 			const nativeHost = { render: () => [], invalidate() {}, [NODE]: nativeLayout };
-			const left = { render: () => [], invalidate() {}, [NODE]: () => reclaimFooterRow(original.call(root)) };
+			const left = { render: () => [], invalidate() {}, [NODE]: () => compactDock(original.call(root)) };
 			// Stable component wrapping the [left, scroll] hstack behind its own
 			// NODE, exactly like `left` wraps the native transcript: the header
 			// vstack's second entry recurses into it the same way pi-tui already

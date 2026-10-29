@@ -134,7 +134,7 @@ export function registerYoloSessionPolicy(pi: ExtensionAPI, env: NodeJS.ProcessE
 	const publish = (ctx: ExtensionContext): void => {
 		const yolo = liveMode === "yolo";
 		try { ctx.ui.setStatus(YOLO_STATUS_KEY, yolo ? YOLO_STATUS_ICON : undefined); } catch { /* display only */ }
-		try { ctx.ui.setWidget(YOLO_STATUS_KEY, yolo ? [YOLO_STATUS_ICON] : undefined); } catch { /* display only */ }
+		try { ctx.ui.setWidget(YOLO_STATUS_KEY, undefined); } catch { /* display only */ }
 		try { ctx.ui.setStatus(MODE_STATUS_KEY, yolo ? undefined : `Permissions: ${liveMode.toUpperCase()}`); } catch { /* display only */ }
 	};
 	const changed = (ctx: ExtensionContext): void => {

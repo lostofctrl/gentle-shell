@@ -263,22 +263,23 @@ test('real editor preserves draft, cursor, selection and clickable usage through
 test('relocated footer keeps notices and changes but no duplicate metrics or location', () => {
   const relocated = { ...presentation, promptOwnsChrome: true };
   const changes = { files: [{ path: 'src/file.ts', added: 1, deleted: 0, status: 'modified' }], added: 1, deleted: 0 };
-  const result = renderShellBelowInputFloat(model, theme, 140, undefined, relocated, changes);
-  assert.match(plain(result.rows), /🚀/);
+  const result = renderShellBelowInputFloat({ ...model, statuses: [...model.statuses, 'MCP ready'] }, theme, 140, undefined, relocated, changes);
+  assert.doesNotMatch(plain(result.rows), /🚀/);
+  assert.match(plain(result.rows), /MCP ready/);
   assert.match(plain(result.rows), /1 file.*\+1/);
   for (const rows of [
     result.rows,
     renderShellBar(model, theme, 140, relocated),
     renderShellBottomOnlyBar(model, theme, 140, undefined, relocated),
     [renderShellHeaderBar(model, theme, 140, undefined, relocated).text],
-  ]) assert.doesNotMatch(plain(rows), /gpt-5|ctx|usage|dashboard|feature\/settings/);
+  ]) assert.doesNotMatch(plain(rows), /🚀|gpt-5|ctx|usage|dashboard|feature\/settings/);
   assert.match(renderShellHeaderBar(model, theme, 140, undefined, { ...relocated, promptOwnsChrome: false }).text, /dashboard ⎇ feature\/settings.*gpt-5/);
   const hiddenMetrics = renderComposerMetrics(model, theme, 140, undefined, { ...presentation, visibility: { modelDetails: false, usageCost: false } });
-  assert.equal(hiddenMetrics.text, '');
+  assert.equal(hiddenMetrics.text, '🚀');
   assert.equal(hiddenMetrics.usageSpan, undefined);
 });
 
-test('YOLO status and widget are icon-only; mode changes retain explicit safety notices', async t => {
+test('YOLO publishes a composer status without an above-editor widget; mode changes retain safety notices', async t => {
   const root = mkdtempSync(join(tmpdir(), 'composer-chrome-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const statuses = new Map(), widgets = new Map(), notices = [];
@@ -291,7 +292,7 @@ test('YOLO status and widget are icon-only; mode changes retain explicit safety 
   assert.equal(await controller.humanAction('on', ctx), true);
   assert.equal(await controller.active(ctx), true);
   assert.equal(statuses.get(YOLO_STATUS_KEY), '🚀');
-  assert.deepEqual(widgets.get(YOLO_STATUS_KEY), ['🚀']);
+  assert.equal(widgets.get(YOLO_STATUS_KEY), undefined);
   assert.equal(statuses.get(MODE_STATUS_KEY), undefined, 'no duplicate Permissions: YOLO text');
   assert.ok(notices.includes(YOLO_STATUS_TEXT));
   assert.match(YOLO_STATUS_TEXT, /guards|review|confirm/i);
@@ -304,6 +305,31 @@ test('YOLO status and widget are icon-only; mode changes retain explicit safety 
   assert.equal(statuses.get(MODE_STATUS_KEY), 'Permissions: AUTO');
   controller.reset(ctx);
   assert.equal(statuses.get(YOLO_STATUS_KEY), undefined);
+});
+
+const rocket = '\x1b[33m🚀\x1b[39m';
+test('composer shows the active YOLO rocket, including with hidden metrics and planning', () => {
+  const hidden = { ...presentation, visibility: { modelDetails: false, usageCost: false } };
+  for (const statuses of [[rocket], ['🚀'], [rocket, '\x1b[33m⏸ plan\x1b[39m'], [], ['not 🚀'], [YOLO_STATUS_TEXT]]) {
+    const active = statuses.includes(rocket) || statuses.includes('🚀');
+    const current = { ...model, statuses };
+    assert.equal(plain(renderComposerMetrics(current, theme, 160, undefined, hidden).text).includes('🚀'), active);
+    for (const width of [0, 1, 2, 3, 8, 20, 40, 80, 160]) {
+      const metrics = renderComposerMetrics(current, theme, width);
+      assert.ok(visibleWidth(metrics.text) <= width);
+      if (width >= 8) assert.equal(plain(metrics.text).includes('🚀'), active);
+      if (metrics.usageSpan) assert.match(plain(sliceByColumn(metrics.text, metrics.usageSpan.start, metrics.usageSpan.end)), /^usage/);
+    }
+    for (const style of ['float', 'neon']) for (const state of ['idle', 'working', 'queued']) {
+      const rows = framePromptLines(['─', 'draft stays intact', '─'], 160, {
+        state, tick: 0, style, borderColor: text => text, ...theme,
+        topRight: width => renderComposerMetrics(current, theme, width).text,
+      });
+      assert.equal(plain(rows[0]).includes('🚀'), active);
+      assert.match(plain(rows[1]), /draft stays intact/);
+      assert.ok(rows.every(row => visibleWidth(row) <= 160));
+    }
+  }
 });
 
 const planning = '\x1b[33m⏸ plan\x1b[39m';
